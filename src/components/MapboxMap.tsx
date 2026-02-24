@@ -1,9 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
-import { Input } from '@/components/ui/input';
-import { Button } from '@/components/ui/button';
-import { MapPin } from 'lucide-react';
 
 interface DangerZone {
   id: string;
@@ -22,17 +19,121 @@ interface UserLocation {
   status: 'safe' | 'alert' | 'danger';
 }
 
-interface MapboxMapProps {
+interface Props {
   dangerZones?: DangerZone[];
   userLocations?: UserLocation[];
   currentUserLocation?: { lat: number; lng: number } | null;
   showDangerZones?: boolean;
   showUserMarkers?: boolean;
   isAdmin?: boolean;
-  onZoneClick?: (zone: DangerZone) => void;
 }
 
-const MapboxMap: React.FC<MapboxMapProps> = ({
+const STATUS_CONFIG = {
+  safe: { color: '#22c55e', glow: '#22c55e80', label: 'SAFE', emoji: '✅', bg: '#052e16' },
+  alert: { color: '#f59e0b', glow: '#f59e0b80', label: 'ALERT', emoji: '⚠️', bg: '#451a03' },
+  danger: { color: '#ef4444', glow: '#ef444480', label: 'DANGER', emoji: '🚨', bg: '#450a0a' },
+};
+
+/** Creates a Snapchat-style floating name badge element */
+function createSnapMarker(username: string, status: 'safe' | 'alert' | 'danger'): HTMLDivElement {
+  const cfg = STATUS_CONFIG[status] || STATUS_CONFIG.safe;
+  const initials = username.slice(0, 2).toUpperCase();
+
+  const wrapper = document.createElement('div');
+  wrapper.style.cssText = `
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    cursor: pointer;
+    filter: drop-shadow(0 4px 12px ${cfg.glow});
+  `;
+
+  // ── Name card (top) ──
+  const card = document.createElement('div');
+  card.style.cssText = `
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(10,10,20,0.92);
+    border: 1.5px solid ${cfg.color};
+    border-radius: 20px;
+    padding: 4px 10px 4px 4px;
+    white-space: nowrap;
+    backdrop-filter: blur(8px);
+    transition: transform 0.15s ease;
+    max-width: 160px;
+  `;
+
+  // Avatar circle with initials
+  const avatar = document.createElement('div');
+  avatar.style.cssText = `
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, ${cfg.color}, ${cfg.glow});
+    border: 2px solid ${cfg.color};
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 800;
+    color: #fff;
+    flex-shrink: 0;
+    font-family: 'Inter', sans-serif;
+    letter-spacing: 0.5px;
+  `;
+  avatar.textContent = initials;
+
+  // Name text
+  const nameEl = document.createElement('span');
+  nameEl.style.cssText = `
+    font-size: 12px;
+    font-weight: 600;
+    color: #fff;
+    font-family: 'Inter', sans-serif;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 110px;
+  `;
+  nameEl.textContent = username;
+
+  card.appendChild(avatar);
+  card.appendChild(nameEl);
+
+  // ── Connector line ──
+  const line = document.createElement('div');
+  line.style.cssText = `
+    width: 2px;
+    height: 8px;
+    background: ${cfg.color};
+    opacity: 0.8;
+  `;
+
+  // ── Status dot (bottom) ──
+  const dot = document.createElement('div');
+  dot.style.cssText = `
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: ${cfg.color};
+    border: 2.5px solid rgba(255,255,255,0.9);
+    box-shadow: 0 0 6px ${cfg.color};
+  `;
+
+  if (status === 'alert' || status === 'danger') {
+    dot.style.animation = 'snap-pulse 1.4s ease-in-out infinite';
+    card.style.animation = 'snap-card-pulse 1.4s ease-in-out infinite';
+  }
+
+  wrapper.appendChild(card);
+  wrapper.appendChild(line);
+  wrapper.appendChild(dot);
+
+  return wrapper;
+}
+
+const MapboxMap: React.FC<Props> = ({
   dangerZones = [],
   userLocations = [],
   currentUserLocation,
@@ -40,219 +141,223 @@ const MapboxMap: React.FC<MapboxMapProps> = ({
   showUserMarkers = true,
   isAdmin = false,
 }) => {
-  const mapContainer = useRef<HTMLDivElement>(null);
-  const map = useRef<mapboxgl.Map | null>(null);
+  const mapRef = useRef<mapboxgl.Map | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const markersRef = useRef<mapboxgl.Marker[]>([]);
-  const [mapboxToken, setMapboxToken] = useState<string>(
-    localStorage.getItem('mapboxToken') || ''
-  );
-  const [isTokenSet, setIsTokenSet] = useState<boolean>(!!localStorage.getItem('mapboxToken'));
+  const zoneIdsRef = useRef<string[]>([]);
+
+  const envToken = import.meta.env.VITE_MAPBOX_TOKEN || '';
+  const [token, setToken] = useState(envToken || localStorage.getItem('mapboxToken') || '');
+  const [ready, setReady] = useState(!!token);
 
   const saveToken = () => {
-    if (mapboxToken.trim()) {
-      localStorage.setItem('mapboxToken', mapboxToken.trim());
-      setIsTokenSet(true);
-    }
+    if (!token.trim()) return;
+    localStorage.setItem('mapboxToken', token.trim());
+    setReady(true);
   };
 
   useEffect(() => {
-    if (!mapContainer.current || !isTokenSet) return;
+    if (envToken && !ready) setReady(true);
+  }, [envToken, ready]);
 
-    mapboxgl.accessToken = mapboxToken;
+  // ── MAP INIT ──────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!containerRef.current || !ready || mapRef.current) return;
 
-    map.current = new mapboxgl.Map({
-      container: mapContainer.current,
+    mapboxgl.accessToken = token;
+    mapRef.current = new mapboxgl.Map({
+      container: containerRef.current,
       style: 'mapbox://styles/mapbox/dark-v11',
-      center: currentUserLocation ? [currentUserLocation.lng, currentUserLocation.lat] : [78.9629, 20.5937],
+      center: currentUserLocation
+        ? [currentUserLocation.lng, currentUserLocation.lat]
+        : [78.9629, 20.5937],
       zoom: currentUserLocation ? 14 : 4,
-      pitch: 45,
     });
-
-    map.current.addControl(new mapboxgl.NavigationControl(), 'top-right');
-
-    map.current.on('style.load', () => {
-      map.current?.setFog({
-        color: 'rgb(20, 20, 30)',
-        'high-color': 'rgb(50, 50, 80)',
-        'horizon-blend': 0.2,
-      });
-    });
+    mapRef.current.addControl(new mapboxgl.NavigationControl());
 
     return () => {
-      map.current?.remove();
+      mapRef.current?.remove();
+      mapRef.current = null;
     };
-  }, [isTokenSet, mapboxToken]);
+  }, [ready]);
 
-  // Update danger zones
+  // ── DANGER ZONES ──────────────────────────────────────────────────────────
   useEffect(() => {
-    if (!map.current || !showDangerZones) return;
+    const map = mapRef.current;
+    if (!map || !showDangerZones) return;
 
-    map.current.on('load', () => {
-      dangerZones.forEach((zone) => {
-        const sourceId = `danger-zone-${zone.id}`;
-        const layerId = `danger-zone-layer-${zone.id}`;
-        const extrusionLayerId = `danger-zone-extrusion-${zone.id}`;
-
-        if (map.current?.getSource(sourceId)) {
-          map.current.removeLayer(layerId);
-          map.current.removeLayer(extrusionLayerId);
-          map.current.removeSource(sourceId);
-        }
-
-        const color = zone.level === 'high' ? '#ef4444' : zone.level === 'medium' ? '#f97316' : '#eab308';
-
-        // Create circle polygon
-        const center = [zone.lng, zone.lat];
-        const radiusInKm = zone.radius / 1000;
-        const points = 64;
-        const coords = [];
-
-        for (let i = 0; i < points; i++) {
-          const angle = (i / points) * 2 * Math.PI;
-          const dx = radiusInKm * Math.cos(angle);
-          const dy = radiusInKm * Math.sin(angle);
-          const lat = center[1] + (dy / 110.574);
-          const lng = center[0] + (dx / (111.320 * Math.cos(center[1] * Math.PI / 180)));
-          coords.push([lng, lat]);
-        }
-        coords.push(coords[0]);
-
-        map.current?.addSource(sourceId, {
-          type: 'geojson',
-          data: {
-            type: 'Feature',
-            properties: { name: zone.name, level: zone.level },
-            geometry: {
-              type: 'Polygon',
-              coordinates: [coords],
-            },
-          },
+    const onStyleLoad = () => {
+      zoneIdsRef.current.forEach((id) => {
+        ['fill', 'outline', 'buffer-fill', 'buffer-outline', 'label'].forEach((suffix) => {
+          if (map.getLayer(`${id}-${suffix}`)) map.removeLayer(`${id}-${suffix}`);
         });
-
-        // 2D circle layer
-        map.current?.addLayer({
-          id: layerId,
-          type: 'fill',
-          source: sourceId,
-          paint: {
-            'fill-color': color,
-            'fill-opacity': 0.3,
-          },
-        });
-
-        // 3D extrusion for danger zones
-        map.current?.addLayer({
-          id: extrusionLayerId,
-          type: 'fill-extrusion',
-          source: sourceId,
-          paint: {
-            'fill-extrusion-color': color,
-            'fill-extrusion-height': zone.level === 'high' ? 500 : zone.level === 'medium' ? 300 : 150,
-            'fill-extrusion-base': 0,
-            'fill-extrusion-opacity': 0.6,
-          },
-        });
+        if (map.getSource(id)) map.removeSource(id);
+        if (map.getSource(`${id}-buffer`)) map.removeSource(`${id}-buffer`);
+        if (map.getSource(`${id}-label`)) map.removeSource(`${id}-label`);
       });
-    });
+      zoneIdsRef.current = [];
+
+      dangerZones.forEach((zone) => {
+        const id = `zone-${zone.id}`;
+        zoneIdsRef.current.push(id);
+
+        const zoneConfig = {
+          high: { color: '#ef4444', opacity: 0.35, bufferColor: '#f87171' },
+          medium: { color: '#f97316', opacity: 0.25, bufferColor: '#fb923c' },
+          low: { color: '#eab308', opacity: 0.15, bufferColor: '#facc15' },
+        };
+        const cfg = zoneConfig[zone.level] || zoneConfig.medium;
+
+        const generateCircle = (radiusKm: number): number[][] => {
+          const coords: number[][] = [];
+          for (let i = 0; i <= 64; i++) {
+            const angle = (i / 64) * Math.PI * 2;
+            const lat = zone.lat + (radiusKm * Math.sin(angle)) / 110.574;
+            const lng = zone.lng + (radiusKm * Math.cos(angle)) / (111.32 * Math.cos((zone.lat * Math.PI) / 180));
+            coords.push([lng, lat]);
+          }
+          return coords;
+        };
+
+        const rKm = zone.radius / 1000;
+        const inner = generateCircle(rKm);
+        const buffer = generateCircle(rKm * 1.5);
+
+        map.addSource(id, { type: 'geojson', data: { type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [inner] } } });
+        map.addLayer({ id: `${id}-fill`, type: 'fill', source: id, paint: { 'fill-color': cfg.color, 'fill-opacity': cfg.opacity } });
+        map.addLayer({ id: `${id}-outline`, type: 'line', source: id, paint: { 'line-color': cfg.color, 'line-width': 2, 'line-opacity': 0.8 } });
+
+        map.addSource(`${id}-buffer`, { type: 'geojson', data: { type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [buffer] } } });
+        map.addLayer({ id: `${id}-buffer-fill`, type: 'fill', source: `${id}-buffer`, paint: { 'fill-color': cfg.bufferColor, 'fill-opacity': cfg.opacity * 0.3 } });
+        map.addLayer({ id: `${id}-buffer-outline`, type: 'line', source: `${id}-buffer`, paint: { 'line-color': cfg.bufferColor, 'line-width': 1, 'line-dasharray': [4, 4], 'line-opacity': 0.5 } });
+
+        map.addSource(`${id}-label`, { type: 'geojson', data: { type: 'Feature', properties: { name: zone.name }, geometry: { type: 'Point', coordinates: [zone.lng, zone.lat] } } });
+        map.addLayer({ id: `${id}-label`, type: 'symbol', source: `${id}-label`, layout: { 'text-field': ['get', 'name'], 'text-size': 12, 'text-font': ['DIN Pro Medium', 'Arial Unicode MS Regular'] }, paint: { 'text-color': '#ffffff', 'text-halo-color': cfg.color, 'text-halo-width': 2 } });
+      });
+    };
+
+    if (map.isStyleLoaded()) onStyleLoad();
+    else map.on('load', onStyleLoad);
   }, [dangerZones, showDangerZones]);
 
-  // Update user markers
+  // ── USER MARKERS (Snapchat style) ─────────────────────────────────────────
   useEffect(() => {
-    if (!map.current || !showUserMarkers) return;
+    const map = mapRef.current;
+    if (!map || !showUserMarkers) return;
 
-    // Clear existing markers
-    markersRef.current.forEach((marker) => marker.remove());
+    markersRef.current.forEach((m) => m.remove());
     markersRef.current = [];
 
     userLocations.forEach((user) => {
-      const el = document.createElement('div');
-      el.className = 'user-marker';
-      el.innerHTML = `
-        <div class="relative">
-          <div class="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold shadow-lg ${
-            user.status === 'safe' ? 'bg-green-500' : user.status === 'alert' ? 'bg-yellow-500' : 'bg-red-500 animate-pulse'
-          }">
-            ${user.username.charAt(0).toUpperCase()}
+      if (!user.lat || !user.lng) return;
+
+      const el = createSnapMarker(user.username || user.touristId, user.status);
+
+      // Popup shown on click for more detail
+      const popup = new mapboxgl.Popup({ offset: [0, -40], maxWidth: '220px', closeButton: false })
+        .setHTML(`
+          <div style="font-family:'Inter',sans-serif; padding:6px 2px;">
+            <div style="font-weight:700; font-size:14px; margin-bottom:3px;">${user.username || user.touristId}</div>
+            <div style="font-size:11px; color:#aaa; font-family:monospace; margin-bottom:6px;">${user.touristId}</div>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <span style="padding:2px 10px; border-radius:12px; background:${STATUS_CONFIG[user.status]?.bg}; color:${STATUS_CONFIG[user.status]?.color}; font-size:11px; font-weight:700; border:1px solid ${STATUS_CONFIG[user.status]?.color}40;">
+                ${STATUS_CONFIG[user.status]?.emoji} ${STATUS_CONFIG[user.status]?.label}
+              </span>
+            </div>
+            <div style="font-size:11px; color:#888; margin-top:6px;">📍 ${user.lat.toFixed(4)}, ${user.lng.toFixed(4)}</div>
           </div>
-          ${user.status === 'danger' ? '<div class="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full animate-ping"></div>' : ''}
-        </div>
-      `;
+        `);
 
-      const popup = new mapboxgl.Popup({ offset: 25 }).setHTML(`
-        <div class="p-2 bg-background text-foreground">
-          <p class="font-semibold">${user.username}</p>
-          <p class="text-xs text-muted-foreground">${user.touristId}</p>
-          <p class="text-xs mt-1 ${user.status === 'safe' ? 'text-green-500' : user.status === 'alert' ? 'text-yellow-500' : 'text-red-500'}">
-            Status: ${user.status.toUpperCase()}
-          </p>
-        </div>
-      `);
-
-      const marker = new mapboxgl.Marker(el)
+      // Anchor at bottom (so the dot lands on the coordinate)
+      const marker = new mapboxgl.Marker({ element: el, anchor: 'bottom' })
         .setLngLat([user.lng, user.lat])
         .setPopup(popup)
-        .addTo(map.current!);
+        .addTo(map);
 
       markersRef.current.push(marker);
     });
 
-    // Add current user marker
+    // Current user marker (blue pulsing ring)
     if (currentUserLocation) {
       const el = document.createElement('div');
-      el.innerHTML = `
-        <div class="w-10 h-10 rounded-full bg-primary flex items-center justify-center shadow-lg border-2 border-white">
-          <svg class="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24">
-            <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
-          </svg>
-        </div>
+      el.style.cssText = `
+        width: 18px; height: 18px; border-radius: 50%;
+        background: #3b82f6; border: 3px solid white;
+        box-shadow: 0 0 0 4px rgba(59,130,246,0.3);
+        animation: snap-pulse 2s ease-in-out infinite;
       `;
-
+      const popup = new mapboxgl.Popup({ offset: 14 }).setHTML(
+        `<div style="font-family:'Inter',sans-serif; padding:4px;"><strong>📍 Your Location</strong></div>`
+      );
       const marker = new mapboxgl.Marker(el)
         .setLngLat([currentUserLocation.lng, currentUserLocation.lat])
-        .addTo(map.current!);
-
+        .setPopup(popup)
+        .addTo(map);
       markersRef.current.push(marker);
-
-      map.current.flyTo({
-        center: [currentUserLocation.lng, currentUserLocation.lat],
-        zoom: 14,
-      });
     }
   }, [userLocations, currentUserLocation, showUserMarkers]);
 
-  if (!isTokenSet) {
+  // ── TOKEN INPUT ───────────────────────────────────────────────────────────
+  if (!ready) {
     return (
-      <div className="w-full h-full flex items-center justify-center bg-muted/30 rounded-xl p-8">
-        <div className="max-w-md text-center">
-          <MapPin className="w-12 h-12 text-primary mx-auto mb-4" />
-          <h3 className="font-display text-lg font-semibold mb-2">Enter Mapbox Token</h3>
-          <p className="text-sm text-muted-foreground mb-4">
-            Get your public token from{' '}
-            <a href="https://mapbox.com" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
-              mapbox.com
-            </a>
-          </p>
-          <div className="flex gap-2">
-            <Input
-              type="text"
-              placeholder="pk.eyJ1..."
-              value={mapboxToken}
-              onChange={(e) => setMapboxToken(e.target.value)}
-              className="bg-muted/50"
-            />
-            <Button onClick={saveToken} className="btn-gradient">
-              Save
-            </Button>
-          </div>
-        </div>
+      <div className="flex flex-col gap-3 p-4">
+        <input
+          placeholder="Enter Mapbox Token"
+          value={token}
+          onChange={(e) => setToken(e.target.value)}
+          className="p-2 border rounded"
+        />
+        <button onClick={saveToken} className="p-2 bg-blue-500 text-white rounded">
+          Save Token
+        </button>
       </div>
     );
   }
 
   return (
     <div className="relative w-full h-full">
-      <div ref={mapContainer} className="absolute inset-0 rounded-xl" />
-      <div className="absolute inset-0 pointer-events-none bg-gradient-to-b from-transparent to-background/10 rounded-xl" />
+      <div ref={containerRef} className="w-full h-full" />
+
+      {/* Map Legend */}
+      {isAdmin && (
+        <div className="absolute bottom-3 left-3 bg-black/80 backdrop-blur-sm rounded-lg p-3 text-xs space-y-1.5 border border-white/10 z-10">
+          <div className="font-semibold text-white/90 mb-2 text-[11px] uppercase tracking-wider">Legend</div>
+          {[
+            { color: '#ef4444', label: 'Danger Zone (High)' },
+            { color: '#f97316', label: 'Caution Zone (Medium)' },
+            { color: '#eab308', label: 'Low Risk Zone' },
+          ].map(({ color, label }) => (
+            <div key={label} className="flex items-center gap-2">
+              <span style={{ background: color }} className="w-3 h-3 rounded-full border border-white/30 inline-block" />
+              <span className="text-white/80">{label}</span>
+            </div>
+          ))}
+          <div className="border-t border-white/10 my-1.5" />
+          {[
+            { color: '#22c55e', label: 'Tourist (Safe)' },
+            { color: '#f59e0b', label: 'Tourist (Alert)' },
+            { color: '#ef4444', label: 'Tourist (Danger)' },
+            { color: '#3b82f6', label: 'Your Location' },
+          ].map(({ color, label }) => (
+            <div key={label} className="flex items-center gap-2">
+              <span style={{ background: color }} className="w-3 h-3 rounded-full border border-white/30 inline-block" />
+              <span className="text-white/80">{label}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Animations */}
+      <style>{`
+        @keyframes snap-pulse {
+          0%, 100% { transform: scale(1); opacity: 1; }
+          50%       { transform: scale(1.25); opacity: 0.75; }
+        }
+        @keyframes snap-card-pulse {
+          0%, 100% { box-shadow: none; }
+          50%       { box-shadow: 0 0 0 3px rgba(239,68,68,0.35); }
+        }
+      `}</style>
     </div>
   );
 };

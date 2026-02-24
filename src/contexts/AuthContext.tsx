@@ -1,7 +1,9 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react';
 import { contractService } from '@/lib/contract/contractService';
+import { supabase } from '@/integrations/supabase/client';
 
 interface User {
+  id: string;
   touristId: string;
   username: string;
   email: string;
@@ -23,7 +25,7 @@ interface AuthContextType {
   verifyAdminOnChain: (walletAddress: string) => Promise<boolean>;
   adminLogout: () => void;
   logout: () => void;
-  register: (userData: Omit<User, 'touristId' | 'status' | 'createdAt'>, password: string) => Promise<string>;
+  register: (userData: Omit<User, 'id' | 'touristId' | 'status' | 'createdAt'>, password: string) => Promise<string>;
   updateStatus: (status: 'safe' | 'alert' | 'danger') => void;
   getAllUsers: () => User[];
   getUserLocations: () => { touristId: string; username: string; lat: number; lng: number; status: 'safe' | 'alert' | 'danger' }[];
@@ -61,11 +63,11 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   useEffect(() => {
     const savedUser = localStorage.getItem('currentUser');
     const savedAdminWallet = localStorage.getItem('adminWalletAddress');
-    
+
     if (savedUser) {
       setUser(JSON.parse(savedUser));
     }
-    
+
     // Re-verify admin status on page load if wallet was previously verified
     if (savedAdminWallet) {
       verifyAdminOnChain(savedAdminWallet);
@@ -76,10 +78,10 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   const verifyAdminOnChain = useCallback(async (walletAddress: string): Promise<boolean> => {
     try {
       setIsVerifyingAdmin(true);
-      
+
       // First check if this is the hardcoded admin wallet (case-insensitive comparison)
       const isHardcodedAdmin = walletAddress.toLowerCase() === ADMIN_WALLET.toLowerCase();
-      
+
       if (isHardcodedAdmin) {
         setIsAdmin(true);
         setAdminWalletAddress(walletAddress);
@@ -87,12 +89,12 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         localStorage.setItem('isAdmin', 'true');
         return true;
       }
-      
+
       // If not hardcoded admin, try to verify on blockchain (if contract is deployed)
       try {
         await contractService.initialize();
         const isAdminOnChain = await contractService.isAdmin(walletAddress);
-        
+
         if (isAdminOnChain) {
           setIsAdmin(true);
           setAdminWalletAddress(walletAddress);
@@ -103,7 +105,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       } catch (contractError) {
         console.warn('Smart contract not available, using hardcoded admin only:', contractError);
       }
-      
+
       // Not an admin
       setIsAdmin(false);
       setAdminWalletAddress(null);
@@ -137,7 +139,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
 
   const loginWithWallet = async (walletAddress: string): Promise<boolean> => {
     const users = JSON.parse(localStorage.getItem('users') || '{}');
-    
+
     // Find user by wallet address
     const foundUser = Object.values(users).find(
       (u: any) => u.walletAddress?.toLowerCase() === walletAddress.toLowerCase()
@@ -167,12 +169,14 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   };
 
   const register = async (
-    userData: Omit<User, 'touristId' | 'status' | 'createdAt'>,
+    userData: Omit<User, 'id' | 'touristId' | 'status' | 'createdAt'>,
     password: string
   ): Promise<string> => {
     const touristId = generateTouristId();
+    const id = crypto.randomUUID();
     const newUser: User = {
       ...userData,
+      id,
       touristId,
       status: 'safe',
       createdAt: new Date().toISOString(),
@@ -185,10 +189,29 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     setUser(newUser);
     localStorage.setItem('currentUser', JSON.stringify(newUser));
 
+    // Sync to Supabase profiles so admin dashboard can see this tourist
+    try {
+      const { supabase } = await import('@/integrations/supabase/client');
+      await supabase.from('profiles').upsert({
+        id,
+        user_id: id,
+        tourist_id: touristId,
+        username: userData.username,
+        email: userData.email,
+        phone: userData.phone || null,
+        dob: userData.dob || null,
+        wallet_address: userData.walletAddress || null,
+        status: 'safe',
+      }, { onConflict: 'user_id' });
+    } catch (e) {
+      console.warn('Profile sync to Supabase failed (non-fatal):', e);
+    }
+
     return touristId;
   };
 
-  const updateStatus = (status: 'safe' | 'alert' | 'danger') => {
+
+  const updateStatus = async (status: 'safe' | 'alert' | 'danger') => {
     if (user) {
       const updatedUser = { ...user, status };
       setUser(updatedUser);
@@ -201,18 +224,14 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         localStorage.setItem('users', JSON.stringify(users));
       }
 
-      // Add alert to admin notifications
-      if (status === 'danger' || status === 'alert') {
-        const alerts = JSON.parse(localStorage.getItem('alerts') || '[]');
-        alerts.push({
-          id: Date.now(),
-          touristId: user.touristId,
-          username: user.username,
-          status,
-          timestamp: new Date().toISOString(),
-          location: JSON.parse(localStorage.getItem('userLocation') || '{}'),
-        });
-        localStorage.setItem('alerts', JSON.stringify(alerts));
+      // Persist status to Supabase profiles table
+      try {
+        await supabase
+          .from('profiles')
+          .update({ status, updated_at: new Date().toISOString() })
+          .eq('tourist_id', user.touristId);
+      } catch (err) {
+        console.error('Failed to update profile status in Supabase:', err);
       }
     }
   };

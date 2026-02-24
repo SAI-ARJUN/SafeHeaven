@@ -16,10 +16,10 @@ const SignUp: React.FC = () => {
   const { toast } = useToast();
   const { isMetaMaskInstalled, connectWallet, isConnected, walletAddress, isConnecting } = useWallet();
   const { register } = useAuth();
-  
+
   // Blockchain integration
-  const { 
-    isInitialized: isContractInitialized, 
+  const {
+    isInitialized: isContractInitialized,
     isLoading: isContractLoading,
     registerTourist: registerOnBlockchain,
     getOwner
@@ -92,7 +92,7 @@ const SignUp: React.FC = () => {
 
     setIsSubmitting(true);
     try {
-      // Register locally first (for localStorage backup)
+      // Register locally (localStorage)
       const touristId = await register(
         {
           username: formData.username,
@@ -104,35 +104,21 @@ const SignUp: React.FC = () => {
         formData.password
       );
       setGeneratedId(touristId);
-      
-      // Save to database via API
-      try {
-        await api.register({
-          username: formData.username,
-          email: formData.email,
-          phone: formData.phone,
-          dob: formData.dob,
-          wallet_address: walletAddress!,
-          tourist_id: touristId,
-        });
-        console.log('Profile saved to database');
-      } catch (dbError) {
-        console.error('Failed to save to database:', dbError);
-        // Continue anyway - localStorage backup is available
-      }
-      
-      // Register on blockchain if contract is initialized
-      if (isContractInitialized) {
-        const dobDate = new Date(formData.dob);
-        const blockchainSuccess = await registerOnBlockchain(
-          formData.username,
-          formData.email,
-          formData.phone,
-          dobDate
-        );
-        setIsBlockchainRegistered(blockchainSuccess);
-      }
-      
+
+      // Save profile directly to Supabase (bypass Edge Function)
+      const { supabase } = await import('@/integrations/supabase/client');
+      const userId = crypto.randomUUID();
+      const { error: dbError } = await supabase.from('profiles').insert({
+        id: userId,
+        user_id: userId,
+        tourist_id: touristId,
+        username: formData.username,
+        email: formData.email,
+        status: 'safe',
+      });
+      if (dbError) console.warn('Profile DB save (non-fatal):', dbError.message);
+      else console.log('Profile saved to Supabase');
+
       setStep('success');
     } catch (error) {
       toast({
@@ -143,6 +129,7 @@ const SignUp: React.FC = () => {
     } finally {
       setIsSubmitting(false);
     }
+
   };
 
   const copyToClipboard = () => {
@@ -173,26 +160,24 @@ const SignUp: React.FC = () => {
             <React.Fragment key={label}>
               <div className="flex flex-col items-center">
                 <div
-                  className={`w-10 h-10 rounded-full flex items-center justify-center font-bold transition-colors ${
-                    (step === 'connect' && index === 0) ||
-                    (step === 'form' && index === 1) ||
-                    (step === 'success' && index === 2)
+                  className={`w-10 h-10 rounded-full flex items-center justify-center font-bold transition-colors ${(step === 'connect' && index === 0) ||
+                      (step === 'form' && index === 1) ||
+                      (step === 'success' && index === 2)
                       ? 'bg-primary text-primary-foreground'
                       : index < (['connect', 'form', 'success'].indexOf(step))
-                      ? 'bg-primary/20 text-primary'
-                      : 'bg-muted text-muted-foreground'
-                  }`}
+                        ? 'bg-primary/20 text-primary'
+                        : 'bg-muted text-muted-foreground'
+                    }`}
                 >
                   {index + 1}
                 </div>
                 <span className="text-xs mt-2 text-muted-foreground">{label}</span>
               </div>
               {index < 2 && (
-                <div className={`w-16 h-0.5 ${
-                  index < ['connect', 'form', 'success'].indexOf(step)
+                <div className={`w-16 h-0.5 ${index < ['connect', 'form', 'success'].indexOf(step)
                     ? 'bg-primary'
                     : 'bg-muted'
-                }`} />
+                  }`} />
               )}
             </React.Fragment>
           ))}
@@ -376,7 +361,7 @@ const SignUp: React.FC = () => {
                   </>
                 )}
               </Button>
-              
+
               {isContractInitialized && (
                 <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground mt-3">
                   <LinkIcon className="w-3 h-3 text-success" />
@@ -412,7 +397,7 @@ const SignUp: React.FC = () => {
                 </button>
               </div>
             </div>
-            
+
             {isBlockchainRegistered && (
               <div className="flex items-center justify-center gap-2 p-3 rounded-xl bg-success/10 border border-success/30 mb-4">
                 <LinkIcon className="w-4 h-4 text-success" />

@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { 
-  Users, 
-  MapPin, 
-  AlertTriangle, 
-  Shield, 
+import {
+  Users,
+  MapPin,
+  AlertTriangle,
+  Shield,
   Bell,
   CheckCircle,
   Clock,
@@ -15,7 +15,10 @@ import {
   Loader2,
   Link as LinkIcon,
   RefreshCw,
-  Database
+  Database,
+  Send,
+  MessageSquare,
+  X
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -28,6 +31,7 @@ import { useRealtimeAlerts } from '@/hooks/useRealtimeAlerts';
 import { useRealtimeLocations } from '@/hooks/useRealtimeLocations';
 import { useRealtimeProfiles } from '@/hooks/useRealtimeProfiles';
 import { api } from '@/lib/api';
+import { supabase } from '@/integrations/supabase/client';
 import type { Tables } from '@/integrations/supabase/types';
 
 type Profile = Tables<'profiles'>;
@@ -50,20 +54,26 @@ const AdminDashboard: React.FC = () => {
   const { toast } = useToast();
   const { adminLogout } = useAuth();
   const { disconnectWallet, walletAddress } = useWallet();
-  
+
   // API Data State
   const [users, setUsers] = useState<Profile[]>([]);
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [dangerZones, setDangerZones] = useState<DangerZone[]>([]);
   const [userLocations, setUserLocations] = useState<UserLocation[]>([]);
   const [analytics, setAnalytics] = useState<{ total_users: number; safe_users: number; alert_users: number; danger_users: number; active_alerts: number } | null>(null);
-  
+
   // UI State
   const [isLoading, setIsLoading] = useState(true);
   const [newZone, setNewZone] = useState({ name: '', lat: '', lng: '', radius: '', level: 'Medium' as 'Low' | 'Medium' | 'High' | 'Critical' });
   const [showAddZone, setShowAddZone] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [blockchainAlerts, setBlockchainAlerts] = useState<BlockchainAlert[]>([]);
+
+  // Notification state
+  const [notifyTarget, setNotifyTarget] = useState<Profile | null>(null);
+  const [notifyMessage, setNotifyMessage] = useState('');
+  const [notifyType, setNotifyType] = useState<'info' | 'warning' | 'danger' | 'evacuation'>('warning');
+  const [isSendingNotification, setIsSendingNotification] = useState(false);
 
   // Blockchain integration
   const {
@@ -77,20 +87,27 @@ const AdminDashboard: React.FC = () => {
     onDangerZoneAdded,
   } = useContract();
 
-  // Load data from API
+  // Load data directly from Supabase (Edge Function not needed)
   const loadData = useCallback(async () => {
     try {
-      const [usersRes, alertsRes, zonesRes, analyticsRes] = await Promise.all([
-        api.users.getAll(),
-        api.alerts.getActive(),
-        api.dangerZones.getAll(),
-        api.analytics(),
+      const [usersRes, alertsRes, zonesRes] = await Promise.all([
+        supabase.from('profiles').select('*').order('created_at', { ascending: false }),
+        supabase.from('alerts').select('*').order('created_at', { ascending: false }), // ALL alerts, for tourist derivation
+        supabase.from('danger_zones').select('*').order('created_at', { ascending: false }),
       ]);
 
-      if (usersRes.data) setUsers(usersRes.data);
-      if (alertsRes.data) setAlerts(alertsRes.data);
-      if (zonesRes.data) setDangerZones(zonesRes.data);
-      if (analyticsRes.data) setAnalytics(analyticsRes.data);
+      const loadedUsers = usersRes.data || [];
+      const loadedAlerts = alertsRes.data || [];
+
+      if (usersRes.error) console.error('profiles error:', usersRes.error);
+      if (alertsRes.error) console.error('alerts error:', alertsRes.error);
+      if (zonesRes.error) console.error('danger_zones error:', zonesRes.error);
+
+      setUsers(loadedUsers);
+      setAlerts(loadedAlerts);
+      setDangerZones(zonesRes.data || []);
+
+      // Analytics computed after displayUsers is derived below
     } catch (error) {
       console.error('Error loading data:', error);
     } finally {
@@ -112,8 +129,11 @@ const AdminDashboard: React.FC = () => {
     enabled: true,
   });
 
-  // Realtime locations subscription
+  // Realtime locations subscription — using split callbacks
   useRealtimeLocations({
+    onLocationsLoaded: (locations) => {
+      setUserLocations(locations);
+    },
     onLocationUpdate: (location) => {
       setUserLocations(prev => {
         const existing = prev.findIndex(l => l.user_id === location.user_id);
@@ -133,8 +153,8 @@ const AdminDashboard: React.FC = () => {
     onNewProfile: (profile) => {
       setUsers(prev => [profile, ...prev.filter(u => u.id !== profile.id)]);
       // Update analytics
-      setAnalytics(prev => prev ? { 
-        ...prev, 
+      setAnalytics(prev => prev ? {
+        ...prev,
         total_users: prev.total_users + 1,
         safe_users: profile.status === 'safe' ? prev.safe_users + 1 : prev.safe_users,
       } : null);
@@ -163,9 +183,9 @@ const AdminDashboard: React.FC = () => {
         timestamp: event.timestamp,
         type: 'emergency',
       };
-      
+
       setBlockchainAlerts(prev => [newAlert, ...prev].slice(0, 20));
-      
+
       toast({
         title: '🚨 Blockchain Emergency Alert!',
         description: `Emergency from ${event.touristId.slice(0, 8)}...`,
@@ -176,7 +196,7 @@ const AdminDashboard: React.FC = () => {
     onStatusUpdate((event) => {
       const statusNames = ['Safe', 'Alert', 'Danger'];
       const statusName = statusNames[event.newStatus] || 'Unknown';
-      
+
       if (event.newStatus >= 1) {
         toast({
           title: `⚡ Blockchain Status Update`,
@@ -217,7 +237,8 @@ const AdminDashboard: React.FC = () => {
 
   const dismissAlert = async (alertId: string) => {
     try {
-      await api.alerts.dismiss(alertId);
+      const { error } = await supabase.from('alerts').update({ dismissed: true }).eq('id', alertId);
+      if (error) throw error;
       setAlerts(prev => prev.filter(a => a.id !== alertId));
       toast({
         title: 'Alert Dismissed',
@@ -255,17 +276,18 @@ const AdminDashboard: React.FC = () => {
         if (!success) return;
       }
 
-      // Add to database
-      const result = await api.dangerZones.create({
+      // Add to database directly
+      const { data: zoneData, error: zoneError } = await supabase.from('danger_zones').insert({
         name: newZone.name,
         lat: parseFloat(newZone.lat),
         lng: parseFloat(newZone.lng),
         radius: parseFloat(newZone.radius),
         level: newZone.level,
-      });
+      }).select().single();
 
-      if (result.data) {
-        setDangerZones(prev => [result.data, ...prev]);
+      if (zoneError) throw zoneError;
+      if (zoneData) {
+        setDangerZones(prev => [zoneData, ...prev]);
       }
 
       setNewZone({ name: '', lat: '', lng: '', radius: '', level: 'Medium' });
@@ -273,7 +295,7 @@ const AdminDashboard: React.FC = () => {
 
       toast({
         title: 'Danger Zone Added',
-        description: isContractInitialized 
+        description: isContractInitialized
           ? `${newZone.name} has been added to the blockchain and database.`
           : `${newZone.name} has been added to the database.`,
       });
@@ -294,12 +316,13 @@ const AdminDashboard: React.FC = () => {
         if (!success) return;
       }
 
-      await api.dangerZones.delete(id);
+      const { error: delError } = await supabase.from('danger_zones').delete().eq('id', id);
+      if (delError) throw delError;
       setDangerZones(prev => prev.filter(z => z.id !== id));
 
       toast({
         title: 'Zone Removed',
-        description: isContractInitialized 
+        description: isContractInitialized
           ? 'Danger zone has been removed from blockchain and database.'
           : 'Danger zone has been removed from database.',
       });
@@ -325,12 +348,12 @@ const AdminDashboard: React.FC = () => {
     setIsSyncing(true);
     try {
       const blockchainZones = await getBlockchainDangerZones();
-      
+
       toast({
         title: 'Synced',
         description: `Found ${blockchainZones.length} danger zones on blockchain.`,
       });
-      
+
       loadData();
     } catch (err) {
       toast({
@@ -345,25 +368,124 @@ const AdminDashboard: React.FC = () => {
 
   const getLevelColor = (level: string | null) => {
     switch (level) {
-      case 'low': return 'bg-yellow-500/20 text-yellow-400 border-yellow-500/50';
-      case 'medium': return 'bg-orange-500/20 text-orange-400 border-orange-500/50';
-      case 'high': return 'bg-red-500/20 text-red-400 border-red-500/50';
+      case 'low': case 'Low': return 'bg-yellow-500/20 text-yellow-400 border-yellow-500/50';
+      case 'medium': case 'Medium': return 'bg-orange-500/20 text-orange-400 border-orange-500/50';
+      case 'high': case 'High': return 'bg-red-500/20 text-red-400 border-red-500/50';
+      case 'Critical': return 'bg-red-600/30 text-red-300 border-red-600/50';
       default: return 'bg-muted';
     }
   };
 
-  // Format locations for map
-  const mapLocations = userLocations.map(loc => {
-    const user = users.find(u => u.user_id === loc.user_id);
-    const status = user?.status as 'safe' | 'alert' | 'danger' || 'safe';
-    return {
-      touristId: loc.tourist_id,
-      username: user?.username || 'Unknown',
-      lat: loc.lat,
-      lng: loc.lng,
-      status,
-    };
-  });
+  // Send notification to a tourist
+  const sendNotification = async () => {
+    if (!notifyTarget || !notifyMessage.trim()) return;
+
+    setIsSendingNotification(true);
+    try {
+      await api.notifications.send({
+        tourist_id: notifyTarget.tourist_id,
+        user_id: notifyTarget.user_id,
+        admin_wallet: walletAddress || 'admin',
+        message: notifyMessage.trim(),
+        notification_type: notifyType,
+      });
+
+      toast({
+        title: 'Notification Sent',
+        description: `Alert sent to ${notifyTarget.username}.`,
+      });
+
+      setNotifyTarget(null);
+      setNotifyMessage('');
+      setNotifyType('warning');
+    } catch (error) {
+      toast({
+        title: 'Error',
+        description: 'Failed to send notification.',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsSendingNotification(false);
+    }
+  };
+
+  // Format locations for map — MERGE user_locations (live GPS) + alerts (fallback)
+  // This ensures ALL tourists appear, regardless of which data source succeeds
+  const mapLocations = (() => {
+    // Step 1: start with live GPS locations
+    const merged: Record<string, { touristId: string; username: string; lat: number; lng: number; status: 'safe' | 'alert' | 'danger' }> = {};
+
+    for (const loc of userLocations) {
+      const profile = displayUsers.find(u => u.tourist_id === loc.tourist_id);
+      merged[loc.tourist_id] = {
+        touristId: loc.tourist_id,
+        username: profile?.username || loc.tourist_id,
+        lat: loc.lat,
+        lng: loc.lng,
+        status: (loc.status || 'safe') as 'safe' | 'alert' | 'danger',
+      };
+    }
+
+    // Step 2: fill in tourists missing from user_locations using latest alert lat/lng
+    const latestAlertPerTourist: Record<string, Alert> = {};
+    for (const a of alerts) {
+      if (a.lat == null || a.lng == null) continue;
+      const prev = latestAlertPerTourist[a.tourist_id];
+      if (!prev || new Date(a.created_at ?? 0) > new Date(prev.created_at ?? 0)) {
+        latestAlertPerTourist[a.tourist_id] = a;
+      }
+    }
+    for (const a of Object.values(latestAlertPerTourist)) {
+      if (merged[a.tourist_id]) {
+        // Already have live GPS — just update status from latest alert
+        merged[a.tourist_id].status = (a.status || 'safe') as 'safe' | 'alert' | 'danger';
+      } else {
+        // No live GPS — use alert position
+        merged[a.tourist_id] = {
+          touristId: a.tourist_id,
+          username: a.username ?? a.tourist_id,
+          lat: a.lat!,
+          lng: a.lng!,
+          status: (a.status || 'safe') as 'safe' | 'alert' | 'danger',
+        };
+      }
+    }
+
+    return Object.values(merged);
+  })();
+
+
+  // Registered tourists: from profiles table, or derived from alerts as fallback
+  // Use LATEST alert status per tourist
+  const displayUsers = users.length > 0 ? users : Object.values(
+    alerts.reduce((acc, a) => {
+      const existing = acc[a.tourist_id];
+      const isNewer = !existing ||
+        new Date(a.created_at ?? 0) > new Date(existing.created_at ?? 0);
+      if (isNewer) {
+        acc[a.tourist_id] = {
+          id: a.tourist_id,
+          user_id: a.user_id,
+          tourist_id: a.tourist_id,
+          username: a.username ?? 'Unknown',
+          email: null,
+          phone: null,
+          dob: null,
+          wallet_address: null,
+          status: a.status ?? 'safe',
+          created_at: a.created_at,
+        } as Profile;
+      }
+      return acc;
+    }, {} as Record<string, Profile>)
+  );
+
+  // Stats derived from displayUsers
+  const statsTotal = displayUsers.length;
+  const statsSafe = displayUsers.filter(u => u.status === 'safe').length;
+  const statsAlert = displayUsers.filter(u => u.status === 'alert').length;
+  const statsDanger = displayUsers.filter(u => u.status === 'danger').length;
+  const activeAlerts = alerts.filter(a => !a.dismissed).length;
 
   // Format danger zones for map
   const mapDangerZones = dangerZones.map(zone => ({
@@ -424,7 +546,7 @@ const AdminDashboard: React.FC = () => {
                 <Users className="w-6 h-6 text-primary" />
               </div>
               <div>
-                <p className="text-2xl font-bold">{analytics?.total_users || users.length}</p>
+                <p className="text-2xl font-bold">{statsTotal}</p>
                 <p className="text-sm text-muted-foreground">Total Users</p>
               </div>
             </div>
@@ -436,7 +558,7 @@ const AdminDashboard: React.FC = () => {
                 <CheckCircle className="w-6 h-6 text-success" />
               </div>
               <div>
-                <p className="text-2xl font-bold">{analytics?.safe_users || 0}</p>
+                <p className="text-2xl font-bold">{statsSafe}</p>
                 <p className="text-sm text-muted-foreground">Safe</p>
               </div>
             </div>
@@ -448,7 +570,7 @@ const AdminDashboard: React.FC = () => {
                 <Bell className="w-6 h-6 text-warning" />
               </div>
               <div>
-                <p className="text-2xl font-bold">{analytics?.alert_users || 0}</p>
+                <p className="text-2xl font-bold">{statsAlert}</p>
                 <p className="text-sm text-muted-foreground">Alert</p>
               </div>
             </div>
@@ -460,7 +582,7 @@ const AdminDashboard: React.FC = () => {
                 <AlertTriangle className="w-6 h-6 text-destructive" />
               </div>
               <div>
-                <p className="text-2xl font-bold">{analytics?.danger_users || 0}</p>
+                <p className="text-2xl font-bold">{statsDanger}</p>
                 <p className="text-sm text-muted-foreground">Emergency</p>
               </div>
             </div>
@@ -502,11 +624,10 @@ const AdminDashboard: React.FC = () => {
               {blockchainAlerts.map((alert) => (
                 <div
                   key={alert.id}
-                  className={`p-4 rounded-xl border ${
-                    alert.type === 'emergency' 
-                      ? 'bg-destructive/10 border-destructive/30' 
-                      : 'bg-warning/10 border-warning/30'
-                  }`}
+                  className={`p-4 rounded-xl border ${alert.type === 'emergency'
+                    ? 'bg-destructive/10 border-destructive/30'
+                    : 'bg-warning/10 border-warning/30'
+                    }`}
                 >
                   <div className="flex items-start justify-between">
                     <div>
@@ -556,13 +677,12 @@ const AdminDashboard: React.FC = () => {
               {alerts.map((alert) => (
                 <div
                   key={alert.id}
-                  className={`p-4 rounded-xl border ${
-                    alert.alert_type === 'entered_danger_zone'
-                      ? 'bg-destructive/10 border-destructive/30'
-                      : alert.status === 'danger'
+                  className={`p-4 rounded-xl border ${alert.alert_type === 'entered_danger_zone'
+                    ? 'bg-destructive/10 border-destructive/30'
+                    : alert.status === 'danger'
                       ? 'bg-destructive/10 border-destructive/30'
                       : 'bg-warning/10 border-warning/30'
-                  }`}
+                    }`}
                 >
                   <div className="flex items-start justify-between">
                     <div>
@@ -616,10 +736,10 @@ const AdminDashboard: React.FC = () => {
             </h2>
 
             <div className="space-y-3 max-h-96 overflow-y-auto">
-              {users.length === 0 ? (
+              {displayUsers.length === 0 ? (
                 <p className="text-muted-foreground text-center py-8">No registered tourists yet</p>
               ) : (
-                users.map((user) => (
+                displayUsers.map((user) => (
                   <div
                     key={user.id}
                     className="p-4 rounded-xl bg-muted/30 hover:bg-muted/50 transition-colors border border-border/50"
@@ -653,13 +773,23 @@ const AdminDashboard: React.FC = () => {
                             Registered: {user.created_at && new Date(user.created_at).toLocaleDateString()}
                           </p>
                         </div>
+                        <div className="flex items-center gap-2 flex-shrink-0">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="gap-1 text-xs"
+                            onClick={() => setNotifyTarget(user)}
+                          >
+                            <Send className="w-3 h-3" />
+                            Alert
+                          </Button>
+                          <span className={`px-3 py-1 rounded-full text-xs font-medium border flex-shrink-0 ${user.status === 'safe' ? 'status-safe' :
+                            user.status === 'alert' ? 'status-alert' : 'status-danger'
+                            }`}>
+                            {user.status?.toUpperCase()}
+                          </span>
+                        </div>
                       </div>
-                      <span className={`px-3 py-1 rounded-full text-xs font-medium border flex-shrink-0 ${
-                        user.status === 'safe' ? 'status-safe' :
-                        user.status === 'alert' ? 'status-alert' : 'status-danger'
-                      }`}>
-                        {user.status?.toUpperCase()}
-                      </span>
                     </div>
                   </div>
                 ))
@@ -681,9 +811,8 @@ const AdminDashboard: React.FC = () => {
                 alerts.slice(0, 10).map((alert) => (
                   <div
                     key={alert.id}
-                    className={`p-4 rounded-xl border ${
-                      alert.status === 'danger' ? 'bg-destructive/10 border-destructive/30' : 'bg-warning/10 border-warning/30'
-                    }`}
+                    className={`p-4 rounded-xl border ${alert.status === 'danger' ? 'bg-destructive/10 border-destructive/30' : 'bg-warning/10 border-warning/30'
+                      }`}
                   >
                     <div className="flex items-start justify-between">
                       <div>
@@ -807,8 +936,8 @@ const AdminDashboard: React.FC = () => {
                     <option value="Critical">Critical Risk</option>
                   </select>
                 </div>
-                <Button 
-                  onClick={addDangerZone} 
+                <Button
+                  onClick={addDangerZone}
                   className="btn-gradient mt-4"
                   disabled={isContractLoading}
                 >
@@ -861,6 +990,72 @@ const AdminDashboard: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Send Notification Modal */}
+      {
+        notifyTarget && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+            <div className="glass-card rounded-2xl p-6 max-w-md w-full border border-border shadow-2xl">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <MessageSquare className="w-5 h-5 text-primary" />
+                  <h3 className="font-display text-lg font-semibold">Send Alert</h3>
+                </div>
+                <button
+                  onClick={() => setNotifyTarget(null)}
+                  className="p-1.5 hover:bg-muted/50 rounded-lg transition-colors"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="mb-4 p-3 rounded-lg bg-muted/30 border border-border/50">
+                <p className="text-sm font-medium">{notifyTarget.username}</p>
+                <p className="text-xs text-muted-foreground font-mono">{notifyTarget.tourist_id}</p>
+              </div>
+
+              <div className="space-y-3">
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Alert Type</label>
+                  <select
+                    value={notifyType}
+                    onChange={(e) => setNotifyType(e.target.value as any)}
+                    className="w-full px-3 py-2 rounded-lg bg-muted/50 border border-border text-sm"
+                  >
+                    <option value="info">ℹ️ Information</option>
+                    <option value="warning">⚠️ Warning</option>
+                    <option value="danger">🚨 Danger Alert</option>
+                    <option value="evacuation">🏃 Evacuation Order</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Message</label>
+                  <textarea
+                    value={notifyMessage}
+                    onChange={(e) => setNotifyMessage(e.target.value)}
+                    placeholder="Type your alert message..."
+                    className="w-full px-3 py-2 rounded-lg bg-muted/50 border border-border text-sm h-24 resize-none"
+                  />
+                </div>
+
+                <Button
+                  onClick={sendNotification}
+                  disabled={!notifyMessage.trim() || isSendingNotification}
+                  className="w-full btn-gradient gap-2"
+                >
+                  {isSendingNotification ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Send className="w-4 h-4" />
+                  )}
+                  Send Notification
+                </Button>
+              </div>
+            </div>
+          </div>
+        )
+      }
     </div>
   );
 };
