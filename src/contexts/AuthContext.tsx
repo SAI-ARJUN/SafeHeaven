@@ -189,27 +189,8 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     setUser(newUser);
     localStorage.setItem('currentUser', JSON.stringify(newUser));
 
-    // Sync to Supabase profiles so admin dashboard can see this tourist
-    try {
-      const { supabase } = await import('@/integrations/supabase/client');
-      await supabase.from('profiles').upsert({
-        id,
-        user_id: id,
-        tourist_id: touristId,
-        username: userData.username,
-        email: userData.email,
-        phone: userData.phone || null,
-        dob: userData.dob || null,
-        wallet_address: userData.walletAddress || null,
-        status: 'safe',
-      }, { onConflict: 'user_id' });
-    } catch (e) {
-      console.warn('Profile sync to Supabase failed (non-fatal):', e);
-    }
-
     return touristId;
   };
-
 
   const updateStatus = async (status: 'safe' | 'alert' | 'danger') => {
     if (user) {
