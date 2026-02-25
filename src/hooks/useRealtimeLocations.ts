@@ -16,6 +16,7 @@ export function useRealtimeLocations({
   enabled = true,
 }: UseRealtimeLocationsOptions = {}) {
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const loadedRef = useRef(false);
 
   useEffect(() => {
     if (!enabled) return;
@@ -33,6 +34,7 @@ export function useRealtimeLocations({
 
       if (data) {
         onLocationsLoaded?.(data);
+        loadedRef.current = true;
       }
     };
 
@@ -44,32 +46,32 @@ export function useRealtimeLocations({
       .on(
         'postgres_changes',
         {
-          event: 'INSERT',
+          event: '*', // Listen to ALL events (INSERT, UPDATE, DELETE)
           schema: 'public',
           table: 'user_locations',
         },
         (payload) => {
+          if (payload.eventType === 'DELETE') {
+            // Handle delete if needed
+            return;
+          }
           onLocationUpdate?.(payload.new as UserLocation);
         }
       )
-      .on(
-        'postgres_changes',
-        {
-          event: 'UPDATE',
-          schema: 'public',
-          table: 'user_locations',
-        },
-        (payload) => {
-          onLocationUpdate?.(payload.new as UserLocation);
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          console.log('✅ Location realtime subscription active');
+        } else if (status === 'CHANNEL_ERROR') {
+          console.error('❌ Location realtime subscription error');
         }
-      )
-      .subscribe();
+      });
 
     channelRef.current = channel;
 
     return () => {
       if (channelRef.current) {
         supabase.removeChannel(channelRef.current);
+        console.log('🔌 Location realtime subscription cleaned up');
       }
     };
   }, [enabled]);

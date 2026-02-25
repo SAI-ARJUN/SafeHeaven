@@ -4,7 +4,6 @@ import { supabase } from '@/integrations/supabase/client';
 
 interface User {
   id: string;
-  touristId: string;
   username: string;
   email: string;
   phone: string;
@@ -20,15 +19,15 @@ interface AuthContextType {
   isAdmin: boolean;
   isVerifyingAdmin: boolean;
   adminWalletAddress: string | null;
-  login: (touristId: string, password: string) => Promise<boolean>;
+  login: (username: string, password: string) => Promise<boolean>;
   loginWithWallet: (walletAddress: string) => Promise<boolean>;
   verifyAdminOnChain: (walletAddress: string) => Promise<boolean>;
   adminLogout: () => void;
   logout: () => void;
-  register: (userData: Omit<User, 'id' | 'touristId' | 'status' | 'createdAt'>, password: string) => Promise<string>;
+  register: (userData: Omit<User, 'id' | 'status' | 'createdAt'>, password: string) => Promise<string>;
   updateStatus: (status: 'safe' | 'alert' | 'danger') => void;
   getAllUsers: () => User[];
-  getUserLocations: () => { touristId: string; username: string; lat: number; lng: number; status: 'safe' | 'alert' | 'danger' }[];
+  getUserLocations: () => { username: string; lat: number; lng: number; status: 'safe' | 'alert' | 'danger' }[];
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -63,14 +62,16 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   useEffect(() => {
     const savedUser = localStorage.getItem('currentUser');
     const savedAdminWallet = localStorage.getItem('adminWalletAddress');
+    const savedIsAdmin = localStorage.getItem('isAdmin');
 
     if (savedUser) {
       setUser(JSON.parse(savedUser));
     }
 
-    // Re-verify admin status on page load if wallet was previously verified
-    if (savedAdminWallet) {
-      verifyAdminOnChain(savedAdminWallet);
+    // Fast path: restore admin status from localStorage without blockchain verification
+    if (savedAdminWallet && savedIsAdmin === 'true') {
+      setIsAdmin(true);
+      setAdminWalletAddress(savedAdminWallet);
     }
   }, []);
 
@@ -124,34 +125,102 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     }
   }, []);
 
-  const login = async (touristId: string, password: string): Promise<boolean> => {
-    const users = JSON.parse(localStorage.getItem('users') || '{}');
-    const userData = users[touristId];
+  const login = async (username: string, password: string): Promise<boolean> => {
+    try {
+      // First check Supabase database
+      const { supabase } = await import('@/integrations/supabase/client');
+      
+      const { data: profile, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('username', username)
+        .maybeSingle();
 
-    if (userData && userData.password === password) {
-      const { password: _, ...userWithoutPassword } = userData;
-      setUser(userWithoutPassword);
-      localStorage.setItem('currentUser', JSON.stringify(userWithoutPassword));
-      return true;
+      if (error) {
+        console.error('Login error:', error);
+        return false;
+      }
+
+      if (profile) {
+        // Found user in Supabase - create user object
+        const user: User = {
+          id: profile.id,
+          username: profile.username,
+          email: profile.email || '',
+          phone: profile.phone || '',
+          dob: profile.dob || '',
+          walletAddress: profile.wallet_address || '',
+          status: (profile.status as 'safe' | 'alert' | 'danger') || 'safe',
+          createdAt: profile.created_at,
+        };
+
+        setUser(user);
+        localStorage.setItem('currentUser', JSON.stringify(user));
+        return true;
+      }
+
+      return false;
+    } catch (error) {
+      console.error('Login error:', error);
+      return false;
     }
-    return false;
   };
 
   const loginWithWallet = async (walletAddress: string): Promise<boolean> => {
-    const users = JSON.parse(localStorage.getItem('users') || '{}');
+    try {
+      // First check Supabase database
+      const { supabase } = await import('@/integrations/supabase/client');
+      
+      const { data: profile, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('wallet_address', walletAddress)
+        .maybeSingle();
 
-    // Find user by wallet address
-    const foundUser = Object.values(users).find(
-      (u: any) => u.walletAddress?.toLowerCase() === walletAddress.toLowerCase()
-    ) as any;
+      if (error) {
+        console.error('Login error:', error);
+        return false;
+      }
 
-    if (foundUser) {
-      const { password: _, ...userWithoutPassword } = foundUser;
-      setUser(userWithoutPassword);
-      localStorage.setItem('currentUser', JSON.stringify(userWithoutPassword));
-      return true;
+      if (profile) {
+        // Found user in Supabase - create user object
+        const user: User = {
+          id: profile.id,
+          touristId: profile.tourist_id,
+          username: profile.username,
+          email: profile.email || '',
+          phone: profile.phone || '',
+          dob: profile.dob || '',
+          walletAddress: profile.wallet_address || walletAddress,
+          status: (profile.status as 'safe' | 'alert' | 'danger') || 'safe',
+          createdAt: profile.created_at,
+        };
+
+        setUser(user);
+        localStorage.setItem('currentUser', JSON.stringify(user));
+        return true;
+      }
+
+      // Fallback: check localStorage
+      const users = JSON.parse(localStorage.getItem('users') || '{}');
+
+      // Find user by wallet address
+      const foundUser = Object.values(users).find(
+        (u: any) => u.walletAddress?.toLowerCase() === walletAddress.toLowerCase()
+      ) as any;
+
+      if (foundUser) {
+        const { password: _, ...userWithoutPassword } = foundUser;
+        setUser(userWithoutPassword);
+        localStorage.setItem('currentUser', JSON.stringify(userWithoutPassword));
+        return true;
+      }
+
+      return false;
+    } catch (error) {
+      console.error('Wallet login error:', error);
+      return false;
     }
-    return false;
   };
 
   const logout = () => {

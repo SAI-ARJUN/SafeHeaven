@@ -68,13 +68,21 @@ class ContractService {
     dob: Date
   ): Promise<ethers.ContractTransactionResponse> {
     this.ensureInitialized();
+
+    // Check if already registered
+    const signerAddress = await this.signer!.getAddress();
+    const existingTourist = await this.getTourist(signerAddress);
     
+    if (existingTourist && existingTourist.isRegistered) {
+      throw new Error('This wallet is already registered on the blockchain');
+    }
+
     const dobTimestamp = toContractTimestamp(dob);
-    
+
     const tx = await this.contract!.registerTourist(
-      username, 
-      email, 
-      phone, 
+      username,
+      email,
+      phone,
       dobTimestamp
     );
     return tx;

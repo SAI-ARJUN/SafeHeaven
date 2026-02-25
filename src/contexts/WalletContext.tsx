@@ -1,5 +1,19 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 
+// Sepolia network configuration
+const SEPOLIA_CHAIN_ID = '0xaa36a7'; // 11155111 in hex
+const SEPOLIA_NETWORK = {
+  chainId: SEPOLIA_CHAIN_ID,
+  chainName: 'Sepolia Testnet',
+  nativeCurrency: {
+    name: 'Sepolia ETH',
+    symbol: 'ETH',
+    decimals: 18,
+  },
+  rpcUrls: ['https://rpc.sepolia.org'],
+  blockExplorerUrls: ['https://sepolia.etherscan.io'],
+};
+
 interface WalletContextType {
   walletAddress: string | null;
   isConnected: boolean;
@@ -7,6 +21,9 @@ interface WalletContextType {
   connectWallet: () => Promise<void>;
   disconnectWallet: () => void;
   isConnecting: boolean;
+  switchToSepolia: () => Promise<void>;
+  currentChainId: string | null;
+  isSepolia: boolean;
 }
 
 const WalletContext = createContext<WalletContextType | undefined>(undefined);
@@ -38,6 +55,9 @@ export const WalletProvider: React.FC<WalletProviderProps> = ({ children }) => {
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
   const [isMetaMaskInstalled, setIsMetaMaskInstalled] = useState(false);
+  const [currentChainId, setCurrentChainId] = useState<string | null>(null);
+
+  const isSepolia = currentChainId === SEPOLIA_CHAIN_ID;
 
   useEffect(() => {
     const checkMetaMask = () => {
@@ -48,8 +68,12 @@ export const WalletProvider: React.FC<WalletProviderProps> = ({ children }) => {
 
     // Check if already connected
     const savedAddress = localStorage.getItem('walletAddress');
+    const savedChainId = localStorage.getItem('chainId');
     if (savedAddress) {
       setWalletAddress(savedAddress);
+    }
+    if (savedChainId) {
+      setCurrentChainId(savedChainId);
     }
 
     // Listen for account changes
@@ -65,10 +89,20 @@ export const WalletProvider: React.FC<WalletProviderProps> = ({ children }) => {
         }
       };
 
+      const handleChainChanged = (chainId: unknown) => {
+        const chainIdString = chainId as string;
+        setCurrentChainId(chainIdString);
+        localStorage.setItem('chainId', chainIdString);
+        // Reload page on network change to ensure everything updates
+        window.location.reload();
+      };
+
       window.ethereum.on('accountsChanged', handleAccountsChanged);
+      window.ethereum.on('chainChanged', handleChainChanged);
 
       return () => {
         window.ethereum?.removeListener('accountsChanged', handleAccountsChanged);
+        window.ethereum?.removeListener('chainChanged', handleChainChanged);
       };
     }
   }, []);
@@ -80,6 +114,10 @@ export const WalletProvider: React.FC<WalletProviderProps> = ({ children }) => {
 
     setIsConnecting(true);
     try {
+      // First, try to switch to Sepolia
+      await switchToSepolia();
+      
+      // Then request account access
       const accounts = await window.ethereum.request({
         method: 'eth_requestAccounts',
       }) as string[];
@@ -90,6 +128,35 @@ export const WalletProvider: React.FC<WalletProviderProps> = ({ children }) => {
       }
     } finally {
       setIsConnecting(false);
+    }
+  };
+
+  const switchToSepolia = async () => {
+    if (!window.ethereum) {
+      throw new Error('MetaMask is not installed');
+    }
+
+    try {
+      // Try to switch to Sepolia
+      await window.ethereum.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: SEPOLIA_CHAIN_ID }],
+      });
+    } catch (switchError: any) {
+      // This error code indicates that the chain has not been added to MetaMask
+      if (switchError.code === 4902) {
+        try {
+          // Add Sepolia network
+          await window.ethereum.request({
+            method: 'wallet_addEthereumChain',
+            params: [SEPOLIA_NETWORK],
+          });
+        } catch (addError) {
+          throw new Error('Failed to add Sepolia network to MetaMask');
+        }
+      } else {
+        throw new Error('Failed to switch to Sepolia network');
+      }
     }
   };
 
@@ -107,6 +174,9 @@ export const WalletProvider: React.FC<WalletProviderProps> = ({ children }) => {
         connectWallet,
         disconnectWallet,
         isConnecting,
+        switchToSepolia,
+        currentChainId,
+        isSepolia,
       }}
     >
       {children}

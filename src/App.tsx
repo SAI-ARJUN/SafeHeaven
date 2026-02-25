@@ -14,6 +14,7 @@ import Dashboard from "./pages/Dashboard";
 import AdminDashboard from "./pages/AdminDashboard";
 import Contact from "./pages/Contact";
 import About from "./pages/About";
+import CheckConnection from "./pages/CheckConnection";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -34,6 +35,7 @@ const App = () => (
               <Route path="/admin-login" element={<AdminLogin />} />
               <Route path="/dashboard" element={<Dashboard />} />
               <Route path="/admin" element={<AdminDashboard />} />
+              <Route path="/check-connection" element={<CheckConnection />} />
               <Route path="/contact" element={<Contact />} />
               <Route path="/about" element={<About />} />
               <Route path="*" element={<NotFound />} />

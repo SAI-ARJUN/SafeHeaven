@@ -23,6 +23,7 @@ import { useToast } from '@/hooks/use-toast';
 import MapboxMap from '@/components/MapboxMap';
 import { useDangerZoneDetection } from '@/hooks/useDangerZoneDetection';
 import { useRealtimeNotifications } from '@/hooks/useRealtimeNotifications';
+import { useRealtimeDangerZones } from '@/hooks/useRealtimeDangerZones';
 import { api } from '@/lib/api';
 import { supabase } from '@/integrations/supabase/client';
 import type { Tables } from '@/integrations/supabase/types';
@@ -39,8 +40,6 @@ const Dashboard: React.FC = () => {
   const [isTracking, setIsTracking] = useState(true);
   const [dangerZones, setDangerZones] = useState<DangerZone[]>([]);
   const [showNotifications, setShowNotifications] = useState(false);
-
-  // Local status state for realtime sync
   const [status, setStatus] = useState<'safe' | 'alert' | 'danger'>('safe');
 
   useEffect(() => {
@@ -65,24 +64,28 @@ const Dashboard: React.FC = () => {
     enabled: !!user?.touristId,
   });
 
-  const loadDangerZones = useCallback(async () => {
-    try {
-      const result = await api.dangerZones.getAll();
-      if (result.data) {
-        setDangerZones(result.data);
-      }
-    } catch (error) {
-      console.error('Error loading danger zones:', error);
-    }
-  }, []);
+  // Realtime danger zones subscription
+  useRealtimeDangerZones({
+    onZonesLoaded: (zones) => {
+      setDangerZones(zones);
+    },
+    onZoneAdded: (newZone) => {
+      setDangerZones(prev => [newZone, ...prev]);
+      toast({
+        title: '🚨 New Danger Zone Added!',
+        description: `${newZone.name} - ${(newZone.level || 'Medium').toUpperCase()} risk`,
+        variant: 'destructive',
+      });
+    },
+    onZoneRemoved: (zoneId) => {
+      setDangerZones(prev => prev.filter(z => z.id !== zoneId));
+    },
+    enabled: !!user,
+  });
 
   useEffect(() => {
     if (!isAuthenticated) navigate('/login');
   }, [isAuthenticated, navigate]);
-
-  useEffect(() => {
-    loadDangerZones();
-  }, [loadDangerZones]);
 
   // ─── Sync this tourist's profile to Supabase so admin can see them ───
   useEffect(() => {

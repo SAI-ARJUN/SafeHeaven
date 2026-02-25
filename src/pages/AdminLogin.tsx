@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Shield, Wallet, AlertCircle, CheckCircle, Link } from 'lucide-react';
+import { Shield, Wallet, AlertCircle, CheckCircle, Link, Zap } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useWallet } from '@/contexts/WalletContext';
 import { useAuth } from '@/contexts/AuthContext';
@@ -13,11 +13,27 @@ const AdminLogin: React.FC = () => {
   const { isMetaMaskInstalled, connectWallet, isConnected, walletAddress, isConnecting } = useWallet();
   const { verifyAdminOnChain, isVerifyingAdmin, isAdmin } = useAuth();
 
+  // INSTANT REDIRECT: Check localStorage immediately on mount
   useEffect(() => {
-    if (isConnected && walletAddress) {
+    const savedAdmin = localStorage.getItem('isAdmin');
+    const savedWallet = localStorage.getItem('adminWalletAddress');
+    
+    if (savedAdmin === 'true' && savedWallet) {
+      // Already verified - redirect instantly without any checks
+      navigate('/admin');
+      return;
+    }
+  }, [navigate]);
+
+  // Auto-verify only if wallet connected and not already verified
+  useEffect(() => {
+    const savedAdmin = localStorage.getItem('isAdmin');
+    if (savedAdmin === 'true') return; // Skip if already verified
+    
+    if (isConnected && walletAddress && !isVerifyingAdmin) {
       handleVerifyAdmin();
     }
-  }, [isConnected, walletAddress]);
+  }, [isConnected, walletAddress, isVerifyingAdmin]);
 
   useEffect(() => {
     if (isAdmin) {
@@ -27,9 +43,25 @@ const AdminLogin: React.FC = () => {
 
   const handleVerifyAdmin = async () => {
     if (!walletAddress) return;
+
+    // INSTANT: Check hardcoded admin wallet (no blockchain needed)
+    const isHardcodedAdmin = walletAddress.toLowerCase() === '0x548cb269df02005590cf48fb031dd697e52aa201'.toLowerCase();
     
+    if (isHardcodedAdmin) {
+      // Set localStorage and redirect instantly
+      localStorage.setItem('isAdmin', 'true');
+      localStorage.setItem('adminWalletAddress', walletAddress);
+      toast({
+        title: 'Admin Verified',
+        description: 'Welcome, Admin. Redirecting to dashboard...',
+      });
+      navigate('/admin');
+      return;
+    }
+
+    // Fallback: Try blockchain verification (only for non-hardcoded wallets)
     const isAdminVerified = await verifyAdminOnChain(walletAddress);
-    
+
     if (isAdminVerified) {
       toast({
         title: 'Admin Verified on Blockchain',

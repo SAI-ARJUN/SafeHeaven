@@ -18,7 +18,9 @@ import {
   Database,
   Send,
   MessageSquare,
-  X
+  X,
+  Radio,
+  Activity
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -74,6 +76,7 @@ const AdminDashboard: React.FC = () => {
   const [notifyMessage, setNotifyMessage] = useState('');
   const [notifyType, setNotifyType] = useState<'info' | 'warning' | 'danger' | 'evacuation'>('warning');
   const [isSendingNotification, setIsSendingNotification] = useState(false);
+  const [lastLocationUpdate, setLastLocationUpdate] = useState<Date | null>(null);
 
   // Blockchain integration
   const {
@@ -87,29 +90,67 @@ const AdminDashboard: React.FC = () => {
     onDangerZoneAdded,
   } = useContract();
 
-  // Load data directly from Supabase (Edge Function not needed)
+  // Load data directly from Supabase - optimized with parallel queries and limits
   const loadData = useCallback(async () => {
     try {
+      console.log('🔄 Loading admin dashboard data from Supabase...');
+      console.log('📡 Supabase URL:', supabase.supabaseUrl);
+      
+      // Load all data in parallel with reasonable limits
       const [usersRes, alertsRes, zonesRes] = await Promise.all([
-        supabase.from('profiles').select('*').order('created_at', { ascending: false }),
-        supabase.from('alerts').select('*').order('created_at', { ascending: false }), // ALL alerts, for tourist derivation
+        supabase.from('profiles').select('*').order('created_at', { ascending: false }).limit(100),
+        supabase.from('alerts').select('*').order('created_at', { ascending: false }).limit(50), // Last 50 alerts only
         supabase.from('danger_zones').select('*').order('created_at', { ascending: false }),
       ]);
+
+      console.log('📊 Users response:', {
+        data: usersRes.data?.length || 0,
+        error: usersRes.error,
+        details: usersRes.data?.map(u => ({ tourist_id: u.tourist_id, username: u.username }))
+      });
+      console.log('🚨 Alerts response:', {
+        data: alertsRes.data?.length || 0,
+        error: alertsRes.error
+      });
+      console.log('🛡️ Zones response:', {
+        data: zonesRes.data?.length || 0,
+        error: zonesRes.error
+      });
 
       const loadedUsers = usersRes.data || [];
       const loadedAlerts = alertsRes.data || [];
 
-      if (usersRes.error) console.error('profiles error:', usersRes.error);
-      if (alertsRes.error) console.error('alerts error:', alertsRes.error);
-      if (zonesRes.error) console.error('danger_zones error:', zonesRes.error);
+      if (usersRes.error) {
+        console.error('❌ profiles error:', usersRes.error);
+        toast({
+          title: 'Database Error',
+          description: `Failed to load users: ${usersRes.error.message}`,
+          variant: 'destructive',
+        });
+      }
+      if (alertsRes.error) console.error('❌ alerts error:', alertsRes.error);
+      if (zonesRes.error) console.error('❌ danger_zones error:', zonesRes.error);
 
       setUsers(loadedUsers);
       setAlerts(loadedAlerts);
       setDangerZones(zonesRes.data || []);
-
-      // Analytics computed after displayUsers is derived below
+      
+      console.log('✅ Dashboard data loaded:', {
+        users: loadedUsers.length,
+        alerts: loadedAlerts.length,
+        zones: zonesRes.data?.length || 0
+      });
+      
+      if (loadedUsers.length === 0) {
+        console.warn('⚠️ No users found in database. Register users first.');
+      }
     } catch (error) {
-      console.error('Error loading data:', error);
+      console.error('❌ Error loading data:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to load dashboard data',
+        variant: 'destructive',
+      });
     } finally {
       setIsLoading(false);
     }
@@ -144,6 +185,7 @@ const AdminDashboard: React.FC = () => {
         }
         return [...prev, location];
       });
+      setLastLocationUpdate(new Date());
     },
     enabled: true,
   });
@@ -169,7 +211,7 @@ const AdminDashboard: React.FC = () => {
     enabled: true,
   });
 
-  // Setup blockchain event listeners
+  // Setup blockchain event listeners - optimized with stable dependencies
   useEffect(() => {
     if (!isContractInitialized) return;
 
@@ -213,17 +255,24 @@ const AdminDashboard: React.FC = () => {
       });
       loadData();
     });
-  }, [isContractInitialized, onEmergencyAlert, onStatusUpdate, onDangerZoneAdded, toast, loadData]);
+    
+    // Cleanup listeners on unmount
+    return () => {
+      // Listeners are automatically cleaned up by the hook
+    };
+  }, [isContractInitialized, onEmergencyAlert, onStatusUpdate, onDangerZoneAdded, loadData]);
 
-  // Check admin auth and load data
+  // Check admin auth - instant localStorage check, then load data
   useEffect(() => {
-    const isAdmin = localStorage.getItem('isAdmin');
-    if (isAdmin !== 'true') {
+    const savedAdmin = localStorage.getItem('isAdmin');
+    if (savedAdmin !== 'true') {
+      // Not verified, redirect to login
       navigate('/admin-login');
       return;
     }
+    // Already verified - load data immediately
     loadData();
-  }, [navigate, loadData]);
+  }, [navigate]);
 
   const handleLogout = () => {
     adminLogout();
@@ -455,30 +504,8 @@ const AdminDashboard: React.FC = () => {
   })();
 
 
-  // Registered tourists: from profiles table, or derived from alerts as fallback
-  // Use LATEST alert status per tourist
-  const displayUsers = users.length > 0 ? users : Object.values(
-    alerts.reduce((acc, a) => {
-      const existing = acc[a.tourist_id];
-      const isNewer = !existing ||
-        new Date(a.created_at ?? 0) > new Date(existing.created_at ?? 0);
-      if (isNewer) {
-        acc[a.tourist_id] = {
-          id: a.tourist_id,
-          user_id: a.user_id,
-          tourist_id: a.tourist_id,
-          username: a.username ?? 'Unknown',
-          email: null,
-          phone: null,
-          dob: null,
-          wallet_address: null,
-          status: a.status ?? 'safe',
-          created_at: a.created_at,
-        } as Profile;
-      }
-      return acc;
-    }, {} as Record<string, Profile>)
-  );
+  // Registered tourists: directly from users state (loaded from profiles table)
+  const displayUsers = users;
 
   // Stats derived from displayUsers
   const statsTotal = displayUsers.length;
@@ -486,6 +513,9 @@ const AdminDashboard: React.FC = () => {
   const statsAlert = displayUsers.filter(u => u.status === 'alert').length;
   const statsDanger = displayUsers.filter(u => u.status === 'danger').length;
   const activeAlerts = alerts.filter(a => !a.dismissed).length;
+  
+  // Count users with live location tracking
+  const liveTrackingCount = userLocations.length;
 
   // Format danger zones for map
   const mapDangerZones = dangerZones.map(zone => ({
@@ -499,10 +529,36 @@ const AdminDashboard: React.FC = () => {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen pt-20 pb-12 flex items-center justify-center">
-        <div className="text-center">
-          <Loader2 className="w-8 h-8 animate-spin mx-auto mb-4 text-primary" />
-          <p className="text-muted-foreground">Loading dashboard...</p>
+      <div className="min-h-screen pt-20 pb-12">
+        <div className="container mx-auto px-4">
+          {/* Header Skeleton */}
+          <div className="flex items-center justify-between mb-8">
+            <div>
+              <div className="h-8 w-48 bg-muted/50 rounded-lg animate-pulse mb-2" />
+              <div className="h-4 w-32 bg-muted/50 rounded-lg animate-pulse" />
+            </div>
+          </div>
+
+          {/* Stats Skeleton */}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+            {[1, 2, 3, 4].map((i) => (
+              <div key={i} className="glass-card rounded-xl p-6">
+                <div className="flex items-center gap-4">
+                  <div className="w-12 h-12 rounded-xl bg-muted/50 animate-pulse" />
+                  <div className="flex-1">
+                    <div className="h-6 w-12 bg-muted/50 rounded animate-pulse mb-2" />
+                    <div className="h-3 w-20 bg-muted/50 rounded animate-pulse" />
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Map Skeleton */}
+          <div className="glass-card rounded-2xl p-6 mb-6">
+            <div className="h-8 w-40 bg-muted/50 rounded animate-pulse mb-4" />
+            <div className="h-[400px] rounded-xl bg-muted/50 animate-pulse" />
+          </div>
         </div>
       </div>
     );
@@ -539,7 +595,7 @@ const AdminDashboard: React.FC = () => {
         </div>
 
         {/* Stats Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-4 mb-8">
           <div className="glass-card rounded-xl p-6">
             <div className="flex items-center gap-4">
               <div className="w-12 h-12 rounded-xl bg-primary/20 flex items-center justify-center">
@@ -587,18 +643,38 @@ const AdminDashboard: React.FC = () => {
               </div>
             </div>
           </div>
+
+          <div className="glass-card rounded-xl p-6">
+            <div className="flex items-center gap-4">
+              <div className="w-12 h-12 rounded-xl bg-green-500/20 flex items-center justify-center">
+                <Radio className="w-6 h-6 text-green-500 animate-pulse" />
+              </div>
+              <div>
+                <p className="text-2xl font-bold">{liveTrackingCount}</p>
+                <p className="text-sm text-muted-foreground">Live Tracking</p>
+              </div>
+            </div>
+          </div>
         </div>
 
         {/* Live Map */}
         <div className="glass-card rounded-2xl p-6 mb-6">
-          <h2 className="font-display text-xl font-semibold mb-4 flex items-center gap-2">
-            <MapPin className="w-5 h-5 text-primary" />
-            Live User Tracking Map
-            <span className="ml-2 px-2 py-0.5 text-xs rounded-full bg-success/20 text-success flex items-center gap-1">
-              <span className="w-2 h-2 rounded-full bg-success animate-pulse" />
-              Live
-            </span>
-          </h2>
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="font-display text-xl font-semibold flex items-center gap-2">
+              <MapPin className="w-5 h-5 text-primary" />
+              Live User Tracking Map
+              <span className="ml-2 px-2 py-0.5 text-xs rounded-full bg-success/20 text-success flex items-center gap-1">
+                <span className="w-2 h-2 rounded-full bg-success animate-pulse" />
+                Live
+              </span>
+            </h2>
+            {lastLocationUpdate && (
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Activity className="w-3 h-3 text-success" />
+                <span>Last update: {lastLocationUpdate.toLocaleTimeString()}</span>
+              </div>
+            )}
+          </div>
           <div className="h-[400px] rounded-xl overflow-hidden">
             <MapboxMap
               dangerZones={mapDangerZones}
