@@ -49,6 +49,13 @@ interface BlockchainAlert {
   type: 'emergency' | 'status';
 }
 
+// Supabase sometimes omits the trailing 'Z' on timestamps, causing JS to
+// treat them as local time instead of UTC. This helper forces UTC parsing.
+const parseUTC = (ts: string): Date => {
+  const normalized = /Z$|[+-]\d{2}:\d{2}$/.test(ts) ? ts : ts + 'Z';
+  return new Date(normalized);
+};
+
 const AdminDashboard: React.FC = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -132,16 +139,20 @@ const AdminDashboard: React.FC = () => {
   // Realtime locations subscription — using split callbacks
   useRealtimeLocations({
     onLocationsLoaded: (locations) => {
+      console.log('📍 Locations loaded:', locations.length);
       setUserLocations(locations);
     },
     onLocationUpdate: (location) => {
+      console.log('📍 Location update received:', location.tourist_id, 'Status:', location.status);
       setUserLocations(prev => {
-        const existing = prev.findIndex(l => l.user_id === location.user_id);
+        const existing = prev.findIndex(l => l.user_id === location.user_id || l.tourist_id === location.tourist_id);
         if (existing >= 0) {
           const updated = [...prev];
           updated[existing] = location;
+          console.log('📍 Updated location for:', location.tourist_id);
           return updated;
         }
+        console.log('📍 New location for:', location.tourist_id);
         return [...prev, location];
       });
     },
@@ -164,7 +175,59 @@ const AdminDashboard: React.FC = () => {
       });
     },
     onProfileUpdated: (profile) => {
-      setUsers(prev => prev.map(u => u.id === profile.id ? profile : u));
+      console.log('🔄 Profile updated received:', profile.username, 'Status:', profile.status);
+      
+      // Update user in the list - match by tourist_id for consistency
+      setUsers(prev => {
+        const updated = prev.map(u => 
+          u.tourist_id === profile.tourist_id ? { ...u, status: profile.status, updated_at: profile.updated_at } : u
+        );
+        console.log('📋 Updated users list:', updated.find(u => u.tourist_id === profile.tourist_id)?.username, 'New status:', profile.status);
+        return updated;
+      });
+      
+      // Update analytics based on status change
+      setAnalytics(prev => {
+        if (!prev) return prev;
+        
+        // Find old status for this user from current users list
+        const oldUser = users.find(u => u.tourist_id === profile.tourist_id);
+        const oldStatus = oldUser?.status;
+        const newStatus = profile.status;
+        
+        console.log('📊 Analytics update:', oldStatus, '→', newStatus);
+        
+        // If status didn't change, return previous analytics
+        if (oldStatus === newStatus) return prev;
+        
+        // Update counts based on old and new status
+        return {
+          ...prev,
+          safe_users: prev.safe_users + (newStatus === 'safe' ? 1 : 0) - (oldStatus === 'safe' ? 1 : 0),
+          alert_users: prev.alert_users + (newStatus === 'alert' ? 1 : 0) - (oldStatus === 'alert' ? 1 : 0),
+          danger_users: prev.danger_users + (newStatus === 'danger' ? 1 : 0) - (oldStatus === 'danger' ? 1 : 0),
+        };
+      });
+      
+      // Show toast notification for status change
+      if (profile.status === 'safe') {
+        toast({
+          title: '✅ User Status Updated',
+          description: `${profile.username} is now SAFE`,
+        });
+      } else if (profile.status === 'alert') {
+        toast({
+          title: '⚠️ User Status Updated',
+          description: `${profile.username} requested ALERT`,
+          variant: 'default',
+        });
+      } else if (profile.status === 'danger') {
+        toast({
+          title: '🚨 User Status Updated',
+          description: `${profile.username} is in DANGER!`,
+          variant: 'destructive',
+        });
+      }
     },
     enabled: true,
   });
@@ -417,12 +480,14 @@ const AdminDashboard: React.FC = () => {
 
     for (const loc of userLocations) {
       const profile = displayUsers.find(u => u.tourist_id === loc.tourist_id);
+      // Use profile status if available (most recent), otherwise use location status
+      const statusFromProfile = profile?.status as 'safe' | 'alert' | 'danger';
       merged[loc.tourist_id] = {
         touristId: loc.tourist_id,
         username: profile?.username || loc.tourist_id,
         lat: loc.lat,
         lng: loc.lng,
-        status: (loc.status || 'safe') as 'safe' | 'alert' | 'danger',
+        status: statusFromProfile || (loc.status || 'safe') as 'safe' | 'alert' | 'danger',
       };
     }
 
@@ -523,6 +588,21 @@ const AdminDashboard: React.FC = () => {
             </p>
           </div>
           <div className="flex items-center gap-4">
+            <Button
+              onClick={() => {
+                loadData();
+                toast({
+                  title: 'Refreshing...',
+                  description: 'Dashboard data is being refreshed.',
+                });
+              }}
+              variant="outline"
+              className="gap-2"
+              title="Refresh data"
+            >
+              <RefreshCw className="w-4 h-4" />
+              Refresh
+            </Button>
             {walletAddress && (
               <div className="flex items-center gap-2 px-4 py-2 rounded-xl bg-muted/30 border border-border">
                 <Wallet className="w-4 h-4 text-primary" />
@@ -705,7 +785,7 @@ const AdminDashboard: React.FC = () => {
                       )}
                       <p className="text-xs text-muted-foreground flex items-center gap-1 mt-1">
                         <Clock className="w-3 h-3" />
-                        {alert.created_at && new Date(alert.created_at).toLocaleString()}
+                        {alert.created_at && parseUTC(alert.created_at).toLocaleString([], { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
                       </p>
                     </div>
                     <Button
@@ -731,7 +811,7 @@ const AdminDashboard: React.FC = () => {
               Registered Tourists
               <span className="ml-2 px-2 py-0.5 text-xs rounded-full bg-primary/20 text-primary flex items-center gap-1">
                 <span className="w-2 h-2 rounded-full bg-success animate-pulse" />
-                {users.length} total
+                {statsTotal} registered
               </span>
             </h2>
 
@@ -739,60 +819,55 @@ const AdminDashboard: React.FC = () => {
               {displayUsers.length === 0 ? (
                 <p className="text-muted-foreground text-center py-8">No registered tourists yet</p>
               ) : (
-                displayUsers.map((user) => (
-                  <div
-                    key={user.id}
-                    className="p-4 rounded-xl bg-muted/30 hover:bg-muted/50 transition-colors border border-border/50"
-                  >
-                    <div className="flex items-start justify-between">
-                      <div className="flex items-start gap-3">
-                        <div className="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center flex-shrink-0">
-                          <Users className="w-5 h-5 text-primary" />
-                        </div>
-                        <div>
-                          <p className="font-medium">{user.username}</p>
-                          <p className="text-xs text-muted-foreground font-mono">{user.tourist_id}</p>
-                          <div className="flex flex-wrap gap-2 mt-2 text-xs text-muted-foreground">
-                            <span className="flex items-center gap-1">
-                              📧 {user.email}
-                            </span>
-                            {user.phone && (
-                              <span className="flex items-center gap-1">
-                                📱 {user.phone}
-                              </span>
-                            )}
+                displayUsers.map((user) => {
+                  const statusColors = {
+                    safe: { border: 'border-green-500/40', avatar: 'bg-green-500/20 border-green-500', text: 'text-green-400', badge: 'bg-green-500/20 text-green-400 border-green-500/50', emoji: '✅' },
+                    alert: { border: 'border-amber-500/40', avatar: 'bg-amber-500/20 border-amber-500', text: 'text-amber-400', badge: 'bg-amber-500/20 text-amber-400 border-amber-500/50', emoji: '⚠️' },
+                    danger: { border: 'border-red-500/50', avatar: 'bg-red-500/20 border-red-500', text: 'text-red-400', badge: 'bg-red-500/20 text-red-400 border-red-500/50', emoji: '🚨' },
+                  };
+                  const sc = statusColors[user.status as keyof typeof statusColors] || statusColors.safe;
+                  return (
+                    <div
+                      key={user.id}
+                      className={`p-4 rounded-xl bg-muted/30 hover:bg-muted/50 transition-colors border ${sc.border}`}
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-3 min-w-0">
+                          {/* Avatar with status colour */}
+                          <div className={`w-10 h-10 rounded-full ${sc.avatar} border-2 flex items-center justify-center flex-shrink-0 font-bold text-sm ${sc.text}`}>
+                            {user.username?.slice(0, 2).toUpperCase() || 'TU'}
                           </div>
-                          {user.wallet_address && (
-                            <p className="text-xs text-muted-foreground font-mono mt-1">
-                              <Wallet className="w-3 h-3 inline mr-1" />
-                              {user.wallet_address.slice(0, 6)}...{user.wallet_address.slice(-4)}
+                          <div className="min-w-0">
+                            <p className="font-semibold truncate">{user.username}</p>
+                            <p className="text-xs text-muted-foreground font-mono truncate">{user.tourist_id}</p>
+                            {user.email && (
+                              <p className="text-xs text-muted-foreground mt-0.5 truncate">📧 {user.email}</p>
+                            )}
+                            <p className="text-xs text-muted-foreground mt-0.5 flex items-center gap-1">
+                              <Clock className="w-3 h-3" />
+                              Registered: {user.created_at && parseUTC(user.created_at).toLocaleDateString()}
                             </p>
-                          )}
-                          <p className="text-xs text-muted-foreground mt-1 flex items-center gap-1">
-                            <Clock className="w-3 h-3" />
-                            Registered: {user.created_at && new Date(user.created_at).toLocaleDateString()}
-                          </p>
+                          </div>
                         </div>
-                        <div className="flex items-center gap-2 flex-shrink-0">
+                        <div className="flex flex-col items-end gap-2 flex-shrink-0">
+                          {/* Live status badge */}
+                          <span className={`px-3 py-1 rounded-full text-xs font-bold border ${sc.badge}`}>
+                            {sc.emoji} {user.status?.toUpperCase() || 'SAFE'}
+                          </span>
                           <Button
                             size="sm"
                             variant="outline"
-                            className="gap-1 text-xs"
+                            className="gap-1 text-xs h-7"
                             onClick={() => setNotifyTarget(user)}
                           >
                             <Send className="w-3 h-3" />
-                            Alert
+                            Notify
                           </Button>
-                          <span className={`px-3 py-1 rounded-full text-xs font-medium border flex-shrink-0 ${user.status === 'safe' ? 'status-safe' :
-                            user.status === 'alert' ? 'status-alert' : 'status-danger'
-                            }`}>
-                            {user.status?.toUpperCase()}
-                          </span>
                         </div>
                       </div>
                     </div>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           </div>
@@ -833,7 +908,16 @@ const AdminDashboard: React.FC = () => {
                       </div>
                       <div className="flex items-center gap-1 text-xs text-muted-foreground">
                         <Clock className="w-3 h-3" />
-                        {alert.created_at && new Date(alert.created_at).toLocaleTimeString()}
+                        {alert.created_at && (() => {
+                          const d = parseUTC(alert.created_at);
+                          const now = new Date();
+                          const isToday = d.toDateString() === now.toDateString();
+                          const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                          return isToday
+                            ? `Today ${time}`
+                            : `${d.toLocaleDateString([], { day: '2-digit', month: '2-digit' })} ${time}`;
+                        })()
+                        }
                       </div>
                     </div>
                   </div>

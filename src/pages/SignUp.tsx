@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { Wallet, User, Mail, Phone, Calendar, Lock, CheckCircle, Copy, ArrowRight, Loader2, Link as LinkIcon, Coins } from 'lucide-react';
+import { Wallet, User, Mail, Phone, Calendar, Lock, CheckCircle, Copy, ArrowRight, Loader2, Link as LinkIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -8,7 +8,6 @@ import { useWallet } from '@/contexts/WalletContext';
 import { useAuth } from '@/contexts/AuthContext';
 import MetaMaskGuide from '@/components/MetaMaskGuide';
 import { useToast } from '@/hooks/use-toast';
-import { useContract } from '@/hooks/useContract';
 import { api } from '@/lib/api';
 
 const SignUp: React.FC = () => {
@@ -17,19 +16,7 @@ const SignUp: React.FC = () => {
   const { isMetaMaskInstalled, connectWallet, isConnected, walletAddress, isConnecting } = useWallet();
   const { register } = useAuth();
 
-  // Blockchain integration
-  const {
-    isInitialized: isContractInitialized,
-    isLoading: isContractLoading,
-    registerTourist: registerOnBlockchain,
-    getOwner
-  } = useContract();
-
   const [step, setStep] = useState<'connect' | 'form' | 'success'>('connect');
-  const [generatedId, setGeneratedId] = useState<string>('');
-  const [isBlockchainRegistered, setIsBlockchainRegistered] = useState(false);
-  const [registrationFee, setRegistrationFee] = useState<string>('0.001');
-  const [adminWallet, setAdminWallet] = useState<string>('');
   const [formData, setFormData] = useState({
     username: '',
     email: '',
@@ -39,17 +26,6 @@ const SignUp: React.FC = () => {
     confirmPassword: '',
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
-
-  // Fetch admin wallet when contract is initialized
-  useEffect(() => {
-    const fetchFeeInfo = async () => {
-      if (isContractInitialized) {
-        const owner = await getOwner();
-        if (owner) setAdminWallet(owner);
-      }
-    };
-    fetchFeeInfo();
-  }, [isContractInitialized, getOwner]);
 
   const handleConnect = async () => {
     try {
@@ -92,8 +68,8 @@ const SignUp: React.FC = () => {
 
     setIsSubmitting(true);
     try {
-      // Register locally (localStorage)
-      const touristId = await register(
+      // Register user
+      const success = await register(
         {
           username: formData.username,
           email: formData.email,
@@ -103,21 +79,16 @@ const SignUp: React.FC = () => {
         },
         formData.password
       );
-      setGeneratedId(touristId);
 
-      // Save profile directly to Supabase (bypass Edge Function)
-      const { supabase } = await import('@/integrations/supabase/client');
-      const userId = crypto.randomUUID();
-      const { error: dbError } = await supabase.from('profiles').insert({
-        id: userId,
-        user_id: userId,
-        tourist_id: touristId,
-        username: formData.username,
-        email: formData.email,
-        status: 'safe',
-      });
-      if (dbError) console.warn('Profile DB save (non-fatal):', dbError.message);
-      else console.log('Profile saved to Supabase');
+      if (!success) {
+        toast({
+          title: 'Registration Failed',
+          description: 'Username already taken. Please try another.',
+          variant: 'destructive',
+        });
+        setIsSubmitting(false);
+        return;
+      }
 
       setStep('success');
     } catch (error) {
@@ -126,17 +97,15 @@ const SignUp: React.FC = () => {
         description: 'Something went wrong. Please try again.',
         variant: 'destructive',
       });
-    } finally {
       setIsSubmitting(false);
     }
-
   };
 
   const copyToClipboard = () => {
-    navigator.clipboard.writeText(generatedId);
+    navigator.clipboard.writeText(formData.username);
     toast({
       title: 'Copied!',
-      description: 'Tourist ID copied to clipboard.',
+      description: 'Username copied to clipboard.',
     });
   };
 
@@ -326,48 +295,28 @@ const SignUp: React.FC = () => {
                 />
               </div>
 
-              {isContractInitialized && (
-                <div className="mt-4 p-4 rounded-xl bg-warning/10 border border-warning/30">
-                  <div className="flex items-center gap-2 mb-2">
-                    <Coins className="w-5 h-5 text-warning" />
-                    <span className="font-medium text-warning">Registration Fee</span>
-                  </div>
-                  <p className="text-2xl font-bold text-foreground">{registrationFee} ETH</p>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    Fee will be sent to admin wallet
-                  </p>
-                  {adminWallet && (
-                    <p className="text-xs text-muted-foreground font-mono mt-1">
-                      {adminWallet.slice(0, 10)}...{adminWallet.slice(-8)}
-                    </p>
-                  )}
-                </div>
-              )}
-
               <Button
                 type="submit"
                 className="btn-gradient w-full py-4 rounded-xl mt-6"
-                disabled={isSubmitting || isContractLoading}
+                disabled={isSubmitting}
               >
-                {(isSubmitting || isContractLoading) ? (
+                {isSubmitting ? (
                   <>
                     <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-                    {isContractLoading ? 'Confirm in MetaMask...' : 'Creating Account...'}
+                    Creating Account...
                   </>
                 ) : (
                   <>
-                    Pay {registrationFee} ETH & Register
+                    Create Account
                     <ArrowRight className="w-5 h-5 ml-2" />
                   </>
                 )}
               </Button>
 
-              {isContractInitialized && (
-                <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground mt-3">
-                  <LinkIcon className="w-3 h-3 text-success" />
-                  <span>Identity will be stored on blockchain after payment</span>
-                </div>
-              )}
+              <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground mt-3">
+                <CheckCircle className="w-3 h-3 text-success" />
+                <span>Free registration - No fees required</span>
+              </div>
             </form>
           </div>
         )}
@@ -382,13 +331,13 @@ const SignUp: React.FC = () => {
               Registration <span className="gradient-text">Successful!</span>
             </h2>
             <p className="text-muted-foreground mb-6">
-              Your unique Tourist ID has been generated. Save it securely!
+              Your account has been created successfully!
             </p>
 
             <div className="p-4 rounded-xl bg-muted border border-border mb-4">
-              <p className="text-xs text-muted-foreground mb-2">Your Tourist ID</p>
+              <p className="text-xs text-muted-foreground mb-2">Your Username</p>
               <div className="flex items-center justify-center gap-2">
-                <p className="font-mono text-xl font-bold text-primary">{generatedId}</p>
+                <p className="font-mono text-xl font-bold text-primary">{formData.username}</p>
                 <button
                   onClick={copyToClipboard}
                   className="p-2 hover:bg-primary/10 rounded-lg transition-colors"
@@ -398,15 +347,8 @@ const SignUp: React.FC = () => {
               </div>
             </div>
 
-            {isBlockchainRegistered && (
-              <div className="flex items-center justify-center gap-2 p-3 rounded-xl bg-success/10 border border-success/30 mb-4">
-                <LinkIcon className="w-4 h-4 text-success" />
-                <span className="text-sm text-success">Identity verified on blockchain</span>
-              </div>
-            )}
-
             <p className="text-sm text-muted-foreground mb-6">
-              Use this ID along with your password to log in.
+              Use this username along with your password to log in.
             </p>
 
             <div className="flex flex-col gap-3">

@@ -41,7 +41,7 @@ export function useSendLocation(
         }
       },
       (err) => console.error('GPS error:', err),
-      { enableHighAccuracy: true }
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
     );
 
     return () => navigator.geolocation.clearWatch(watchId);

@@ -22,7 +22,7 @@ interface UserLocation {
 interface Props {
   dangerZones?: DangerZone[];
   userLocations?: UserLocation[];
-  currentUserLocation?: { lat: number; lng: number } | null;
+  currentUserLocation?: { lat: number; lng: number; status?: 'safe' | 'alert' | 'danger' } | null;
   showDangerZones?: boolean;
   showUserMarkers?: boolean;
   isAdmin?: boolean;
@@ -165,13 +165,18 @@ const MapboxMap: React.FC<Props> = ({
     if (!containerRef.current || !ready || mapRef.current) return;
 
     mapboxgl.accessToken = token;
+    
+    // Center on current user location if available, otherwise default to India
+    const defaultCenter = currentUserLocation
+      ? [currentUserLocation.lng, currentUserLocation.lat]
+      : [78.9629, 20.5937];
+    const defaultZoom = currentUserLocation ? 15 : 4;
+
     mapRef.current = new mapboxgl.Map({
       container: containerRef.current,
       style: 'mapbox://styles/mapbox/dark-v11',
-      center: currentUserLocation
-        ? [currentUserLocation.lng, currentUserLocation.lat]
-        : [78.9629, 20.5937],
-      zoom: currentUserLocation ? 14 : 4,
+      center: defaultCenter,
+      zoom: defaultZoom,
     });
     mapRef.current.addControl(new mapboxgl.NavigationControl());
 
@@ -180,6 +185,20 @@ const MapboxMap: React.FC<Props> = ({
       mapRef.current = null;
     };
   }, [ready]);
+
+  // ── CENTER MAP ON CURRENT USER LOCATION CHANGE ───────────────────────────
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !currentUserLocation) return;
+
+    // Smooth fly to user location when it changes
+    map.flyTo({
+      center: [currentUserLocation.lng, currentUserLocation.lat],
+      zoom: 15,
+      essential: true,
+      duration: 2000,
+    });
+  }, [currentUserLocation]);
 
   // ── DANGER ZONES ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -243,56 +262,86 @@ const MapboxMap: React.FC<Props> = ({
   // ── USER MARKERS (Snapchat style) ─────────────────────────────────────────
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !showUserMarkers) return;
+    if (!map) return;
 
     markersRef.current.forEach((m) => m.remove());
     markersRef.current = [];
 
-    userLocations.forEach((user) => {
-      if (!user.lat || !user.lng) return;
+    // Show other users' markers only if showUserMarkers is true (for admin)
+    if (showUserMarkers) {
+      userLocations.forEach((user) => {
+        if (!user.lat || !user.lng) return;
 
-      const el = createSnapMarker(user.username || user.touristId, user.status);
+        const el = createSnapMarker(user.username || user.touristId, user.status);
 
-      // Popup shown on click for more detail
-      const popup = new mapboxgl.Popup({ offset: [0, -40], maxWidth: '220px', closeButton: false })
-        .setHTML(`
-          <div style="font-family:'Inter',sans-serif; padding:6px 2px;">
-            <div style="font-weight:700; font-size:14px; margin-bottom:3px;">${user.username || user.touristId}</div>
-            <div style="font-size:11px; color:#aaa; font-family:monospace; margin-bottom:6px;">${user.touristId}</div>
-            <div style="display:flex; gap:8px; align-items:center;">
-              <span style="padding:2px 10px; border-radius:12px; background:${STATUS_CONFIG[user.status]?.bg}; color:${STATUS_CONFIG[user.status]?.color}; font-size:11px; font-weight:700; border:1px solid ${STATUS_CONFIG[user.status]?.color}40;">
-                ${STATUS_CONFIG[user.status]?.emoji} ${STATUS_CONFIG[user.status]?.label}
-              </span>
+        // Popup shown on click for more detail
+        const popup = new mapboxgl.Popup({ offset: [0, -40], maxWidth: '240px', closeButton: false })
+          .setHTML(`
+            <div style="font-family:'Inter',sans-serif; padding:8px 4px;">
+              <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
+                <div style="width:34px; height:34px; border-radius:50%; background:${STATUS_CONFIG[user.status]?.bg}; border:2px solid ${STATUS_CONFIG[user.status]?.color}; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:13px; color:${STATUS_CONFIG[user.status]?.color};">
+                  ${(user.username || user.touristId).slice(0, 2).toUpperCase()}
+                </div>
+                <div>
+                  <div style="font-weight:700; font-size:14px; color:#fff;">${user.username || user.touristId}</div>
+                  <div style="font-size:10px; color:#888; font-family:monospace;">${user.touristId}</div>
+                </div>
+              </div>
+              <div style="display:flex; align-items:center; gap:6px; padding:6px 10px; border-radius:10px; background:${STATUS_CONFIG[user.status]?.bg}; border:1.5px solid ${STATUS_CONFIG[user.status]?.color}40; margin-bottom:6px;">
+                <div style="width:8px; height:8px; border-radius:50%; background:${STATUS_CONFIG[user.status]?.color}; box-shadow:0 0 6px ${STATUS_CONFIG[user.status]?.color};"></div>
+                <span style="font-weight:800; font-size:13px; color:${STATUS_CONFIG[user.status]?.color}; letter-spacing:0.5px;">
+                  ${STATUS_CONFIG[user.status]?.emoji} ${STATUS_CONFIG[user.status]?.label}
+                </span>
+                <span style="margin-left:auto; font-size:9px; color:${STATUS_CONFIG[user.status]?.color}; opacity:0.8;">LIVE</span>
+              </div>
+              <div style="font-size:11px; color:#888; display:flex; align-items:center; gap:4px;">
+                📍 ${user.lat.toFixed(5)}, ${user.lng.toFixed(5)}
+              </div>
             </div>
-            <div style="font-size:11px; color:#888; margin-top:6px;">📍 ${user.lat.toFixed(4)}, ${user.lng.toFixed(4)}</div>
-          </div>
-        `);
+          `);
 
-      // Anchor at bottom (so the dot lands on the coordinate)
-      const marker = new mapboxgl.Marker({ element: el, anchor: 'bottom' })
-        .setLngLat([user.lng, user.lat])
-        .setPopup(popup)
-        .addTo(map);
+        // Anchor at bottom (so the dot lands on the coordinate)
+        const marker = new mapboxgl.Marker({ element: el, anchor: 'bottom' })
+          .setLngLat([user.lng, user.lat])
+          .setPopup(popup)
+          .addTo(map);
 
-      markersRef.current.push(marker);
-    });
+        markersRef.current.push(marker);
+      });
+    }
 
-    // Current user marker (blue pulsing ring)
+    // Current user marker (colored ring based on status) - ALWAYS show for user dashboard
     if (currentUserLocation) {
+      const userStatus = currentUserLocation.status || 'safe';
+      const statusConfig = STATUS_CONFIG[userStatus];
+      
       const el = document.createElement('div');
       el.style.cssText = `
-        width: 18px; height: 18px; border-radius: 50%;
-        background: #3b82f6; border: 3px solid white;
-        box-shadow: 0 0 0 4px rgba(59,130,246,0.3);
+        width: 24px; height: 24px; border-radius: 50%;
+        background: ${statusConfig.color};
+        border: 3px solid white;
+        box-shadow: 0 0 0 6px ${statusConfig.glow};
         animation: snap-pulse 2s ease-in-out infinite;
+        cursor: pointer;
       `;
-      const popup = new mapboxgl.Popup({ offset: 14 }).setHTML(
-        `<div style="font-family:'Inter',sans-serif; padding:4px;"><strong>📍 Your Location</strong></div>`
+      
+      const popup = new mapboxgl.Popup({ offset: [0, -30], closeButton: false }).setHTML(
+        `<div style="font-family:'Inter',sans-serif; padding:6px 8px; background:rgba(10,10,20,0.95); border-radius:12px; border:1.5px solid ${statusConfig.color};">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <div style="width:12px; height:12px; border-radius:50%; background:${statusConfig.color}; box-shadow:0 0 8px ${statusConfig.color}; animation: snap-pulse 1s ease-in-out infinite;"></div>
+            <strong style="color:#fff; font-size:13px;">${statusConfig.emoji} ${statusConfig.label}</strong>
+          </div>
+          <div style="font-size:11px; color:#888; margin-top:4px; font-family:monospace;">
+            ${currentUserLocation.lat.toFixed(5)}, ${currentUserLocation.lng.toFixed(5)}
+          </div>
+        </div>`
       );
-      const marker = new mapboxgl.Marker(el)
+      
+      const marker = new mapboxgl.Marker({ element: el, anchor: 'center' })
         .setLngLat([currentUserLocation.lng, currentUserLocation.lat])
         .setPopup(popup)
         .addTo(map);
+      
       markersRef.current.push(marker);
     }
   }, [userLocations, currentUserLocation, showUserMarkers]);

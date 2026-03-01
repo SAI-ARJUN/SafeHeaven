@@ -15,7 +15,7 @@ const Login: React.FC = () => {
   const { connectWallet, isMetaMaskInstalled, walletAddress, isConnecting } = useWallet();
 
   const [formData, setFormData] = useState({
-    touristId: '',
+    username: '',
     password: '',
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -31,7 +31,7 @@ const Login: React.FC = () => {
     setIsSubmitting(true);
 
     try {
-      const success = await login(formData.touristId, formData.password);
+      const success = await login(formData.username, formData.password);
       if (success) {
         toast({
           title: 'Welcome Back!',
@@ -41,7 +41,7 @@ const Login: React.FC = () => {
       } else {
         toast({
           title: 'Login Failed',
-          description: 'Invalid Tourist ID or password.',
+          description: 'Invalid username or password.',
           variant: 'destructive',
         });
       }
@@ -111,7 +111,7 @@ const Login: React.FC = () => {
               Welcome <span className="gradient-text">Back</span>
             </h2>
             <p className="text-muted-foreground">
-              Login with your Tourist ID and password
+              Login with your username and password
             </p>
           </div>
 
@@ -141,16 +141,16 @@ const Login: React.FC = () => {
             /* Login Form */
             <form onSubmit={handleSubmit} className="space-y-5">
               <div>
-                <Label htmlFor="touristId" className="flex items-center gap-2 mb-2">
+                <Label htmlFor="username" className="flex items-center gap-2 mb-2">
                   <User className="w-4 h-4 text-primary" />
-                  Tourist ID
+                  Username
                 </Label>
                 <Input
-                  id="touristId"
-                  name="touristId"
-                  value={formData.touristId}
+                  id="username"
+                  name="username"
+                  value={formData.username}
                   onChange={handleInputChange}
-                  placeholder="Enter your Tourist ID (e.g., TID-XXX-XXXX)"
+                  placeholder="Enter your username"
                   required
                   className="bg-muted/50 border-border"
                 />

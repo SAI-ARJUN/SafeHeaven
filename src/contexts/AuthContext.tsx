@@ -1,5 +1,4 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react';
-import { contractService } from '@/lib/contract/contractService';
 import { supabase } from '@/integrations/supabase/client';
 
 interface User {
@@ -20,12 +19,12 @@ interface AuthContextType {
   isAdmin: boolean;
   isVerifyingAdmin: boolean;
   adminWalletAddress: string | null;
-  login: (touristId: string, password: string) => Promise<boolean>;
+  login: (username: string, password: string) => Promise<boolean>;
   loginWithWallet: (walletAddress: string) => Promise<boolean>;
   verifyAdminOnChain: (walletAddress: string) => Promise<boolean>;
   adminLogout: () => void;
   logout: () => void;
-  register: (userData: Omit<User, 'id' | 'touristId' | 'status' | 'createdAt'>, password: string) => Promise<string>;
+  register: (userData: Omit<User, 'id' | 'touristId' | 'status' | 'createdAt'>, password: string) => Promise<boolean>;
   updateStatus: (status: 'safe' | 'alert' | 'danger') => void;
   getAllUsers: () => User[];
   getUserLocations: () => { touristId: string; username: string; lat: number; lng: number; status: 'safe' | 'alert' | 'danger' }[];
@@ -45,14 +44,7 @@ interface AuthProviderProps {
   children: ReactNode;
 }
 
-const ADMIN_WALLET = '0x548cb269df02005590CF48fb031dD697e52aa201'; // Admin wallet
-
-const generateTouristId = (): string => {
-  const prefix = 'TID';
-  const timestamp = Date.now().toString(36).toUpperCase();
-  const random = Math.random().toString(36).substring(2, 6).toUpperCase();
-  return `${prefix}-${timestamp}-${random}`;
-};
+const ADMIN_WALLET = '0x548cb269df02005590CF48fb031dD697e52aa201';
 
 export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
@@ -124,9 +116,9 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     }
   }, []);
 
-  const login = async (touristId: string, password: string): Promise<boolean> => {
+  const login = async (username: string, password: string): Promise<boolean> => {
     const users = JSON.parse(localStorage.getItem('users') || '{}');
-    const userData = users[touristId];
+    const userData = users[username.toLowerCase()];
 
     if (userData && userData.password === password) {
       const { password: _, ...userWithoutPassword } = userData;
@@ -171,25 +163,48 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   const register = async (
     userData: Omit<User, 'id' | 'touristId' | 'status' | 'createdAt'>,
     password: string
-  ): Promise<string> => {
-    const touristId = generateTouristId();
+  ): Promise<boolean> => {
+    const username = userData.username.toLowerCase();
+    
+    // Check if username already exists
+    const users = JSON.parse(localStorage.getItem('users') || '{}');
+    if (users[username]) {
+      return false; // Username already taken
+    }
+
     const id = crypto.randomUUID();
     const newUser: User = {
       ...userData,
       id,
-      touristId,
+      touristId: username, // Use username as touristId for compatibility
       status: 'safe',
       createdAt: new Date().toISOString(),
     };
 
-    const users = JSON.parse(localStorage.getItem('users') || '{}');
-    users[touristId] = { ...newUser, password };
+    users[username] = { ...newUser, password };
     localStorage.setItem('users', JSON.stringify(users));
 
     setUser(newUser);
     localStorage.setItem('currentUser', JSON.stringify(newUser));
 
-    return touristId;
+    // Save to Supabase
+    try {
+      await supabase.from('profiles').insert({
+        id,
+        user_id: id,
+        tourist_id: username,
+        username: userData.username,
+        email: userData.email,
+        phone: userData.phone,
+        dob: userData.dob,
+        wallet_address: userData.walletAddress,
+        status: 'safe',
+      });
+    } catch (err) {
+      console.error('Failed to save to Supabase:', err);
+    }
+
+    return true;
   };
 
   const updateStatus = async (status: 'safe' | 'alert' | 'danger') => {
@@ -207,12 +222,42 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
 
       // Persist status to Supabase profiles table
       try {
-        await supabase
+        const { error: profileError } = await supabase
           .from('profiles')
-          .update({ status, updated_at: new Date().toISOString() })
-          .eq('tourist_id', user.touristId);
+          .update({ 
+            status, 
+            updated_at: new Date().toISOString(),
+            updated_by: 'user'
+          })
+          .eq('tourist_id', user.touristId)
+          .select();
+        
+        if (profileError) {
+          console.error('Profile update error:', profileError);
+        } else {
+          console.log('✅ Profile status updated in Supabase:', status);
+        }
       } catch (err) {
         console.error('Failed to update profile status in Supabase:', err);
+      }
+
+      // Also update user_locations table for real-time map updates
+      try {
+        const { error: locationError } = await supabase
+          .from('user_locations')
+          .update({ 
+            status,
+            updated_at: new Date().toISOString()
+          })
+          .eq('tourist_id', user.touristId);
+        
+        if (locationError) {
+          console.error('Location update error:', locationError);
+        } else {
+          console.log('✅ Location status updated in Supabase:', status);
+        }
+      } catch (err) {
+        console.error('Failed to update location status:', err);
       }
     }
   };

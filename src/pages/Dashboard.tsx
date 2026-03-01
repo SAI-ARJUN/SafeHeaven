@@ -36,9 +36,10 @@ const Dashboard: React.FC = () => {
   const { user, isAuthenticated, updateStatus } = useAuth();
 
   const [location, setLocation] = useState<{ lat: number; lng: number } | null>(null);
-  const [isTracking, setIsTracking] = useState(true);
+  const [isTracking, setIsTracking] = useState(true); // Always start tracking by default
   const [dangerZones, setDangerZones] = useState<DangerZone[]>([]);
   const [showNotifications, setShowNotifications] = useState(false);
+  const [locationPermission, setLocationPermission] = useState<'granted' | 'denied' | 'prompt'>('prompt');
 
   // Local status state for realtime sync
   const [status, setStatus] = useState<'safe' | 'alert' | 'danger'>('safe');
@@ -124,31 +125,73 @@ const Dashboard: React.FC = () => {
   useEffect(() => {
     if (!isTracking || !navigator.geolocation || !user) return;
 
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        setLocation({
-          lat: position.coords.latitude,
-          lng: position.coords.longitude,
-        });
-      },
-      console.warn,
-      { enableHighAccuracy: true }
-    );
+    // Request permission first
+    if (navigator.permissions) {
+      navigator.permissions.query({ name: 'geolocation' as PermissionName })
+        .then((result) => {
+          setLocationPermission(result.state as 'granted' | 'denied' | 'prompt');
+          
+          if (result.state === 'denied') {
+            toast({
+              title: '📍 Location Permission Denied',
+              description: 'Please enable location access in browser settings.',
+              variant: 'destructive',
+            });
+            return;
+          }
 
-    const watchId = navigator.geolocation.watchPosition(
-      (position) => {
-        setLocation({
-          lat: position.coords.latitude,
-          lng: position.coords.longitude,
+          // Start watching position
+          startGPSWatch();
+        })
+        .catch(() => {
+          // Fallback for browsers that don't support permissions API
+          startGPSWatch();
         });
-      },
-      (error) => {
-        console.error('GPS watch error:', error);
-      },
-      { enableHighAccuracy: true }
-    );
+    } else {
+      startGPSWatch();
+    }
 
-    return () => navigator.geolocation.clearWatch(watchId);
+    function startGPSWatch() {
+      // Initial position
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          setLocation({
+            lat: position.coords.latitude,
+            lng: position.coords.longitude,
+          });
+          setLocationPermission('granted');
+        },
+        (error) => {
+          console.error('GPS initial error:', error);
+          if (error.code === 1) {
+            setLocationPermission('denied');
+            toast({
+              title: '📍 Location Permission Required',
+              description: 'Please allow location access to use this feature.',
+              variant: 'destructive',
+            });
+          }
+        },
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+      );
+
+      // Watch position changes
+      const watchId = navigator.geolocation.watchPosition(
+        (position) => {
+          setLocation({
+            lat: position.coords.latitude,
+            lng: position.coords.longitude,
+          });
+          setLocationPermission('granted');
+        },
+        (error) => {
+          console.error('GPS watch error:', error);
+        },
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+      );
+
+      return () => navigator.geolocation.clearWatch(watchId);
+    }
   }, [isTracking, user]);
 
   useEffect(() => {
@@ -280,7 +323,7 @@ const Dashboard: React.FC = () => {
               Welcome, <span className="gradient-text">{user.username}</span>
             </h1>
             <p className="text-sm text-muted-foreground font-mono mt-1">
-              {user.touristId}
+              @{user.username}
             </p>
           </div>
           <div className="flex items-center gap-3">
@@ -421,24 +464,72 @@ const Dashboard: React.FC = () => {
           </div>
         )}
 
+        {/* Location Permission Warning */}
+        {locationPermission === 'denied' && (
+          <div className="glass-card rounded-2xl p-5 mb-6 border-2 border-red-500/50 bg-red-500/5">
+            <div className="flex items-center gap-3">
+              <AlertTriangle className="w-6 h-6 text-red-400" />
+              <div className="flex-1">
+                <p className="font-semibold text-sm text-red-400">
+                  📍 Location Access Denied
+                </p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Please enable location access in your browser settings to use live tracking.
+                </p>
+              </div>
+              <button
+                onClick={() => window.location.reload()}
+                className="px-4 py-2 text-xs bg-red-500/20 text-red-400 rounded-lg hover:bg-red-500/30 transition-colors"
+              >
+                Retry
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Location Loading Indicator */}
+        {locationPermission === 'prompt' && !location && (
+          <div className="glass-card rounded-2xl p-5 mb-6 border border-border">
+            <div className="flex items-center gap-3">
+              <Loader2 className="w-6 h-6 text-primary animate-spin" />
+              <div>
+                <p className="font-semibold text-sm">Requesting Location Access...</p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Please allow location access when prompted by your browser.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Map */}
         <div className="glass-card rounded-2xl p-5 mb-6 border border-border">
-          <div className="flex items-center gap-2 mb-3">
-            <MapPin className="w-5 h-5 text-primary" />
-            <h2 className="font-display text-lg font-semibold">Area Map</h2>
-            {isTracking && (
-              <span className="ml-auto px-2 py-0.5 text-xs rounded-full bg-green-500/20 text-green-400 flex items-center gap-1">
-                <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-                Live
-              </span>
-            )}
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <MapPin className="w-5 h-5 text-primary" />
+              <h2 className="font-display text-lg font-semibold">Area Map</h2>
+            </div>
+            <div className="flex items-center gap-2">
+              {location && (
+                <span className="text-xs text-muted-foreground font-mono">
+                  📍 {location.lat.toFixed(4)}, {location.lng.toFixed(4)}
+                </span>
+              )}
+              {isTracking && (
+                <span className="px-2 py-0.5 text-xs rounded-full bg-green-500/20 text-green-400 flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+                  Live
+                </span>
+              )}
+            </div>
           </div>
           <div className="h-[400px] rounded-xl overflow-hidden">
             <MapboxMap
               dangerZones={mapDangerZones}
-              currentUserLocation={location}
+              currentUserLocation={location ? { ...location, status } : null}
               showDangerZones={true}
               showUserMarkers={false}
+              isAdmin={false}
             />
           </div>
         </div>

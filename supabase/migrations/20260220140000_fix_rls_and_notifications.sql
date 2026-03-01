@@ -44,6 +44,9 @@ CREATE POLICY "Anyone can view profiles"   ON public.profiles FOR SELECT USING (
 CREATE POLICY "Anyone can insert profiles" ON public.profiles FOR INSERT WITH CHECK (true);
 CREATE POLICY "Anyone can update profiles" ON public.profiles FOR UPDATE USING (true);
 
+-- Enable realtime for profiles table
+ALTER PUBLICATION supabase_realtime ADD TABLE public.profiles;
+
 -- ═══════════════════════════════════════════════════════
 -- Create admin_notifications table
 -- ═══════════════════════════════════════════════════════
