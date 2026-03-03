@@ -1,6 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react';
-import { contractService } from '@/lib/contract/contractService';
-import { supabase } from '@/integrations/supabase/client';
+import { api } from '@/lib/api';
 
 interface User {
   id: string;
@@ -24,8 +23,8 @@ interface AuthContextType {
   verifyAdminOnChain: (walletAddress: string) => Promise<boolean>;
   adminLogout: () => void;
   logout: () => void;
-  register: (userData: Omit<User, 'id' | 'status' | 'createdAt'>, password: string) => Promise<string>;
-  updateStatus: (status: 'safe' | 'alert' | 'danger') => void;
+  register: (userData: Omit<User, 'id' | 'touristId' | 'status' | 'createdAt'>, password: string) => Promise<boolean>;
+  updateStatus: (status: 'safe' | 'alert' | 'danger') => Promise<void>;
   getAllUsers: () => User[];
   getUserLocations: () => { username: string; lat: number; lng: number; status: 'safe' | 'alert' | 'danger' }[];
 }
@@ -240,8 +239,44 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   const register = async (
     userData: Omit<User, 'id' | 'touristId' | 'status' | 'createdAt'>,
     password: string
-  ): Promise<string> => {
-    const touristId = generateTouristId();
+  ): Promise<boolean> => {
+    const username = userData.username.toLowerCase();
+
+    // Check if username already exists in localStorage
+    const users = JSON.parse(localStorage.getItem('users') || '{}');
+    if (users[username]) {
+      return false; // Username already taken
+    }
+
+    // 🔒 CHECK: Verify wallet address is not already in use
+    const walletAddress = userData.walletAddress.toLowerCase();
+    const existingUserWithWallet = Object.values(users).find(
+      (u: any) => u.walletAddress && u.walletAddress.toLowerCase() === walletAddress
+    );
+    
+    if (existingUserWithWallet) {
+      console.error('❌ Wallet address already in use:', walletAddress);
+      throw new Error('WALLET_IN_USE'); // Special error for wallet already registered
+    }
+
+    // Check if profile already exists in MySQL database with this wallet
+    try {
+      const allProfiles = await api.profiles.getAll();
+      const existingProfile = allProfiles.find(
+        (p: any) => p.wallet_address && p.wallet_address.toLowerCase() === walletAddress
+      );
+      
+      if (existingProfile) {
+        console.error('❌ Wallet already registered in database:', walletAddress);
+        throw new Error('WALLET_IN_USE');
+      }
+    } catch (err: any) {
+      if (err.message === 'WALLET_IN_USE') {
+        throw err; // Re-throw wallet error
+      }
+      // Other errors are OK - DB might be down, continue with localStorage
+    }
+
     const id = crypto.randomUUID();
     const newUser: User = {
       ...userData,
@@ -258,7 +293,31 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     setUser(newUser);
     localStorage.setItem('currentUser', JSON.stringify(newUser));
 
-    return touristId;
+    // Save to MySQL database via API - CRITICAL for admin dashboard
+    try {
+      const profile = await api.profiles.create({
+        email: userData.email,
+        name: userData.username,
+        phone: userData.phone,
+        status: 'active',
+        location_status: 'safe',
+        wallet_address: userData.walletAddress, // Store wallet address in database
+      });
+      console.log('✅ Profile created in database:', profile);
+
+      // Store the database profile ID in localStorage for location tracking
+      const updatedUser = { ...newUser, dbProfileId: profile.id };
+      setUser(updatedUser);
+      localStorage.setItem('currentUser', JSON.stringify(updatedUser));
+      users[username] = { ...users[username], dbProfileId: profile.id };
+      localStorage.setItem('users', JSON.stringify(users));
+
+    } catch (err: any) {
+      console.error('❌ Failed to save to database:', err);
+      // Don't fail registration if DB is down, but log the error
+    }
+
+    return true;
   };
 
   const updateStatus = async (status: 'safe' | 'alert' | 'danger') => {
@@ -274,14 +333,23 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         localStorage.setItem('users', JSON.stringify(users));
       }
 
-      // Persist status to Supabase profiles table
+      // Persist status to database via API - update BOTH status and location_status
       try {
-        await supabase
-          .from('profiles')
-          .update({ status, updated_at: new Date().toISOString() })
-          .eq('tourist_id', user.touristId);
+        const profile = await api.profiles.getByEmail(user.email);
+        if (profile) {
+          const profileId = (profile as any)._id || (profile as any).id;
+          if (profileId) {
+            await api.profiles.update(profileId, {
+              status: status === 'safe' ? 'active' : 'active', // Keep as 'active'
+              location_status: status, // 🔴 This is what admin dashboard shows!
+            });
+            console.log('✅ Profile status updated in database:', status);
+          } else {
+            console.warn('⚠️ Profile found but no ID:', profile);
+          }
+        }
       } catch (err) {
-        console.error('Failed to update profile status in Supabase:', err);
+        console.error('❌ Failed to update profile status:', err);
       }
     }
   };

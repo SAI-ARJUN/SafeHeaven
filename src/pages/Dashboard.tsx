@@ -20,16 +20,23 @@ import {
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/hooks/use-toast';
-import MapboxMap from '@/components/MapboxMap';
+import LeafletMap from '@/components/LeafletMap';
 import { useDangerZoneDetection } from '@/hooks/useDangerZoneDetection';
 import { useRealtimeNotifications } from '@/hooks/useRealtimeNotifications';
 import { useRealtimeDangerZones } from '@/hooks/useRealtimeDangerZones';
 import { api } from '@/lib/api';
-import { supabase } from '@/integrations/supabase/client';
-import type { Tables } from '@/integrations/supabase/types';
 import { useSendLocation } from '@/hooks/useSendLocation';
 
-type DangerZone = Tables<'danger_zones'>;
+interface DangerZone {
+  id: number;
+  name: string;
+  latitude: number;
+  longitude: number;
+  radius: number;
+  severity: string;
+  description: string;
+  created_at: string;
+}
 
 const Dashboard: React.FC = () => {
   const navigate = useNavigate();
@@ -48,8 +55,8 @@ const Dashboard: React.FC = () => {
     }
   }, [user?.status]);
 
-  // Activate realtime location sender (direct Supabase upsert, no Edge function)
-  useSendLocation(user?.id || '', user?.touristId || '', status);
+  // Activate realtime location sender
+  useSendLocation(user?.id || '', user?.touristId || '', status, user?.email);
 
   const { nearestZone } = useDangerZoneDetection(
     location,
@@ -87,40 +94,46 @@ const Dashboard: React.FC = () => {
     if (!isAuthenticated) navigate('/login');
   }, [isAuthenticated, navigate]);
 
-  // ─── Sync this tourist's profile to Supabase so admin can see them ───
+  useEffect(() => {
+    loadDangerZones();
+  }, [loadDangerZones]);
+
+  // ─── Sync this tourist's profile to MySQL database so admin can see them ───
   useEffect(() => {
     if (!user) return;
     const syncProfile = async () => {
-      // Check if profile already exists
-      const { data: existing } = await supabase
-        .from('profiles')
-        .select('id')
-        .eq('tourist_id', user.touristId)
-        .maybeSingle();
+      try {
+        // Check if profile already exists by email
+        const existing = await api.profiles.getByEmail(user.email);
 
-      if (existing) {
-        // Update existing profile
-        const { error } = await supabase
-          .from('profiles')
-          .update({ username: user.username, email: user.email || '', status: user.status || 'safe' })
-          .eq('tourist_id', user.touristId);
-        if (error) console.warn('Profile update error:', error.message);
-      } else {
-        // Insert new profile
-        const uid = user.id || crypto.randomUUID();
-        const { error } = await supabase.from('profiles').insert({
-          id: uid,
-          user_id: uid,
-          tourist_id: user.touristId,
-          username: user.username,
-          email: user.email || '',
-          status: user.status || 'safe',
-        });
-        if (error) console.warn('Profile insert error:', error.message);
+        if (existing) {
+          // Update existing profile only if we have a valid ID
+          const profileId = (existing as any)._id || (existing as any).id;
+          if (profileId) {
+            await api.profiles.update(profileId, {
+              name: user.username,
+              status: user.status || 'safe',
+            });
+            console.log('✅ Profile updated:', profileId);
+          } else {
+            console.warn('⚠️ Profile found but no ID:', existing);
+          }
+        } else {
+          // Insert new profile
+          await api.profiles.create({
+            email: user.email || `${user.touristId}@safeheaven.local`,
+            name: user.username,
+            status: user.status || 'active',
+            location_status: user.status || 'safe',
+          });
+          console.log('✅ Profile created for:', user.username);
+        }
+      } catch (error) {
+        console.warn('Profile sync error:', error);
       }
     };
     syncProfile();
-  }, [user?.touristId]);
+  }, [user?.touristId, user?.email, user?.username, user?.status]);
 
 
   // ─── GPS watch for local state only (useSendLocation handles DB writes) ───
@@ -163,33 +176,34 @@ const Dashboard: React.FC = () => {
     }
   }, [user]);
 
-  // ─── Insert alert directly to Supabase (no blockchain) ───
+  // ─── Insert alert directly to MySQL database (no blockchain) ───
   const insertAlert = async (alertStatus: 'alert' | 'danger', alertType: string) => {
-    const userId = user?.id || user?.walletAddress || crypto.randomUUID();
-    const touristId = user?.touristId || '';
     const username = user?.username || 'Unknown';
 
-    if (!touristId) {
-      console.error('Cannot insert alert: no touristId');
+    if (!user) {
+      console.error('Cannot insert alert: no user');
       return;
     }
 
-    const { error } = await supabase.from('alerts').insert({
-      alert_id: crypto.randomUUID(),
-      user_id: userId,
-      tourist_id: touristId,
-      username: username,
-      status: alertStatus,
-      lat: location?.lat ?? null,
-      lng: location?.lng ?? null,
-      alert_type: alertType,
-      dismissed: false,
-    });
-    if (error) {
-      console.error('Alert insert error:', JSON.stringify(error));
+    try {
+      // First, get the profile to get the profile_id
+      const profile = await api.profiles.getByEmail(user.email);
+      
+      await api.alerts.create({
+        profile_id: profile ? (profile as any)._id || (profile as any).id : undefined,
+        latitude: location?.lat ?? undefined,
+        longitude: location?.lng ?? undefined,
+        severity: alertStatus,
+        description: `${username} - ${alertType}`,
+        status: alertStatus, // Store the actual status (alert/danger)
+      });
+      
+      console.log('✅ Alert created for profile:', profile);
+    } catch (error) {
+      console.error('❌ Alert insert error:', error);
       toast({
-        title: `DB Error [${error.code}]`,
-        description: error.message,
+        title: 'DB Error',
+        description: 'Failed to save alert to database',
         variant: 'destructive',
       });
     }
@@ -437,7 +451,7 @@ const Dashboard: React.FC = () => {
             )}
           </div>
           <div className="h-[400px] rounded-xl overflow-hidden">
-            <MapboxMap
+            <LeafletMap
               dangerZones={mapDangerZones}
               currentUserLocation={location}
               showDangerZones={true}

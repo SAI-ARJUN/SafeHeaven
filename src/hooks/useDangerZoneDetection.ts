@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { useToast } from '@/hooks/use-toast';
-import { supabase } from '@/integrations/supabase/client';
+import { api } from '@/lib/api';
 
 interface DangerZone {
-  id: string;
+  id: number;
   name: string;
-  lat: number;
-  lng: number;
+  latitude: number;
+  longitude: number;
   radius: number;
-  level: string;
+  severity: string;
 }
 
 interface UserLocation {
@@ -41,37 +41,24 @@ export const useDangerZoneDetection = (
   const [dangerZones, setDangerZones] = useState<DangerZone[]>([]);
   const [nearestZone, setNearestZone] = useState<{ zone: DangerZone; distance: number } | null>(null);
 
-  // Fetch danger zones from Supabase
+  // Fetch danger zones from API
   useEffect(() => {
     const fetchZones = async () => {
-      const { data, error } = await supabase
-        .from('danger_zones')
-        .select('*');
-
-      if (error) {
+      try {
+        const data = await api.dangerZones.getAll();
+        setDangerZones(data || []);
+      } catch (error) {
         console.error('Error fetching danger zones:', error);
-        return;
       }
-
-      setDangerZones(data || []);
     };
 
     fetchZones();
 
-    // Also subscribe to realtime changes so new zones are picked up
-    const channel = supabase
-      .channel('danger-zones-detection')
-      .on('postgres_changes', {
-        event: '*',
-        schema: 'public',
-        table: 'danger_zones',
-      }, () => {
-        fetchZones();
-      })
-      .subscribe();
+    // Poll for updates every 10 seconds (replaces realtime subscriptions)
+    const intervalId = setInterval(fetchZones, 10000);
 
     return () => {
-      supabase.removeChannel(channel);
+      clearInterval(intervalId);
     };
   }, []);
 
@@ -85,8 +72,8 @@ export const useDangerZoneDetection = (
       const distance = calculateDistance(
         userLocation.lat,
         userLocation.lng,
-        zone.lat,
-        zone.lng
+        zone.latitude,
+        zone.longitude
       );
 
       // Track closest zone
@@ -104,32 +91,25 @@ export const useDangerZoneDetection = (
         // Notify tourist
         toast({
           title: `🚨 Danger Zone Alert!`,
-          description: `You have entered ${zone.name} (${(zone.level || 'medium').toUpperCase()} risk area). Stay alert and follow safety guidelines.`,
+          description: `You have entered ${zone.name} (${(zone.severity || 'medium').toUpperCase()} risk area). Stay alert and follow safety guidelines.`,
           variant: 'destructive',
         });
 
-        // Create alert in Supabase for admin dashboard
+        // Create alert via API for admin dashboard
         if (!adminNotifiedRef.current.has(zoneKey)) {
           adminNotifiedRef.current.add(zoneKey);
 
-          // Insert alert into Supabase alerts table
           const insertAlert = async () => {
-            const { error } = await supabase
-              .from('alerts')
-              .insert({
-                user_id: userId || touristId,
-                tourist_id: touristId,
-                username,
-                status: 'danger',
-                lat: userLocation.lat,
-                lng: userLocation.lng,
-                zone_name: zone.name,
-                zone_level: zone.level || 'medium',
-                alert_type: 'entered_danger_zone',
-                dismissed: false,
+            try {
+              await api.alerts.create({
+                profile_id: userId ? parseInt(userId) : undefined,
+                latitude: userLocation.lat,
+                longitude: userLocation.lng,
+                location_name: zone.name,
+                severity: zone.severity || 'medium',
+                description: `User ${username} entered danger zone`,
               });
-
-            if (error) {
+            } catch (error) {
               console.error('Error creating danger zone alert:', error);
             }
           };

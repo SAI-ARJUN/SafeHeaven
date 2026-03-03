@@ -1,15 +1,10 @@
-import { supabase } from "@/integrations/supabase/client";
-
-const API_BASE = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/api`;
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
 
 async function fetchAPI(path: string, options: RequestInit = {}) {
-  const { data: { session } } = await supabase.auth.getSession();
-
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
     headers: {
       "Content-Type": "application/json",
-      "Authorization": `Bearer ${session?.access_token || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
       ...options.headers,
     },
   });
@@ -26,161 +21,162 @@ async function fetchAPI(path: string, options: RequestInit = {}) {
 // Health check
 export const checkHealth = () => fetchAPI("/health");
 
-// Registration
-export const registerUser = (profile: {
-  username: string;
+// Profiles
+export const getProfiles = () => fetchAPI("/profiles");
+export const getProfileById = (id: number) => fetchAPI(`/profiles/${id}`);
+export const getProfileByEmail = (email: string) => fetchAPI(`/profiles/email/${email}`);
+export const createProfile = (profile: {
   email: string;
-  phone: string;
-  dob: string;
-  wallet_address: string;
-  tourist_id?: string;
-  user_id?: string;
+  name?: string;
+  phone?: string;
+  status?: string;
+  location_status?: string;
 }) =>
-  fetchAPI("/register", {
+  fetchAPI("/profiles", {
     method: "POST",
     body: JSON.stringify(profile),
   });
-
-// Users
-export const getAllUsers = () => fetchAPI("/users");
-export const getUserById = (userId: string) => fetchAPI(`/users/${userId}`);
-export const updateUserStatus = (userId: string, status: string) =>
-  fetchAPI(`/users/${userId}/status`, {
+export const updateProfile = (id: number, profile: {
+  name?: string;
+  phone?: string;
+  status?: string;
+  location_status?: string;
+}) =>
+  fetchAPI(`/profiles/${id}`, {
     method: "PATCH",
-    body: JSON.stringify({ status }),
+    body: JSON.stringify(profile),
   });
+
+// Alerts
+export const getAlerts = () => fetchAPI("/alerts");
+export const getAlertById = (id: number) => fetchAPI(`/alerts/${id}`);
+export const createAlert = async (alert: {
+  profile_id?: number | string;
+  latitude?: number;
+  longitude?: number;
+  location_name?: string;
+  severity?: string;
+  description?: string;
+}) =>
+  fetchAPI("/alerts", {
+    method: "POST",
+    body: JSON.stringify(alert),
+  });
+export const dismissAlert = (id: number) =>
+  fetchAPI(`/alerts/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ dismissed: true }),
+  });
+export const deleteAlert = (id: number) =>
+  fetchAPI(`/alerts/${id}`, { method: "DELETE" });
 
 // Danger Zones
 export const getDangerZones = () => fetchAPI("/danger-zones");
+export const getDangerZoneById = (id: number) => fetchAPI(`/danger-zones/${id}`);
 export const createDangerZone = (zone: {
   name: string;
-  lat: number;
-  lng: number;
-  radius: number;
-  level: string;
-  created_by?: string;
+  latitude?: number;
+  longitude?: number;
+  radius?: number;
+  severity?: string;
+  description?: string;
 }) =>
   fetchAPI("/danger-zones", {
     method: "POST",
     body: JSON.stringify(zone),
   });
-export const deleteDangerZone = (zoneId: string) =>
-  fetchAPI(`/danger-zones/${zoneId}`, { method: "DELETE" });
-
-// Alerts
-export const getActiveAlerts = () => fetchAPI("/alerts");
-export const dismissAlert = (alertId: string) =>
-  fetchAPI(`/alerts/${alertId}/dismiss`, { method: "PATCH" });
-
-// Create alert (direct Supabase insert for reliability)
-export const createAlert = async (alert: {
-  user_id: string;
-  tourist_id: string;
-  username: string;
-  status: string;
-  lat?: number | null;
-  lng?: number | null;
-  zone_name?: string | null;
-  zone_level?: string | null;
-  alert_type?: string;
-}) => {
-  const { data, error } = await supabase
-    .from('alerts')
-    .insert({
-      ...alert,
-      dismissed: false,
-    })
-    .select()
-    .single();
-
-  if (error) throw error;
-  return { data };
-};
+export const updateDangerZone = (id: number, zone: {
+  name?: string;
+  latitude?: number;
+  longitude?: number;
+  radius?: number;
+  severity?: string;
+  description?: string;
+}) =>
+  fetchAPI(`/danger-zones/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(zone),
+  });
+export const deleteDangerZone = (id: number) =>
+  fetchAPI(`/danger-zones/${id}`, { method: "DELETE" });
 
 // Locations
-export const updateUserLocation = (location: {
-  user_id: string;
-  tourist_id: string;
-  lat: number;
-  lng: number;
-  username?: string;
+export const getLocations = () => fetchAPI("/locations");
+export const getLocationsByProfile = (profileId: number | string) => fetchAPI(`/locations/profile/${profileId}`);
+export const createLocation = (location: {
+  profile_id: number | string;
+  latitude: number;
+  longitude: number;
+  accuracy?: number;
 }) =>
   fetchAPI("/locations", {
     method: "POST",
     body: JSON.stringify(location),
   });
+export const updateProfileLocation = (profileId: number | string, location: {
+  latitude: number;
+  longitude: number;
+  accuracy?: number;
+  location_status?: string;
+}) =>
+  fetchAPI(`/locations/profile/${profileId}`, {
+    method: "PUT",
+    body: JSON.stringify(location),
+  });
 
-// Analytics
-export const getAnalytics = () => fetchAPI("/analytics");
-
-// Admin Notifications (direct Supabase for realtime)
-export const sendNotification = async (notification: {
-  tourist_id: string;
-  user_id: string;
-  admin_wallet: string;
+// Notifications
+export const getNotifications = () => fetchAPI("/notifications");
+export const getNotificationsByProfile = (profileId: number | string) => fetchAPI(`/notifications/profile/${profileId}`);
+export const createNotification = (notification: {
+  profile_id?: number | string;
   message: string;
-  notification_type?: string;
-}) => {
-  const { data, error } = await supabase
-    .from('admin_notifications')
-    .insert({
-      ...notification,
-      notification_type: notification.notification_type || 'warning',
-      read: false,
-    })
-    .select()
-    .single();
-
-  if (error) throw error;
-  return { data };
-};
-
-export const getNotificationsForUser = async (touristId: string) => {
-  const { data, error } = await supabase
-    .from('admin_notifications')
-    .select('*')
-    .eq('tourist_id', touristId)
-    .order('created_at', { ascending: false });
-
-  if (error) throw error;
-  return { data };
-};
-
-export const markNotificationRead = async (id: string) => {
-  const { error } = await supabase
-    .from('admin_notifications')
-    .update({ read: true })
-    .eq('id', id);
-
-  if (error) throw error;
-};
+}) =>
+  fetchAPI("/notifications", {
+    method: "POST",
+    body: JSON.stringify(notification),
+  });
+export const markNotificationRead = (id: number) =>
+  fetchAPI(`/notifications/${id}`, {
+    method: "PATCH",
+  });
+export const deleteNotification = (id: number) =>
+  fetchAPI(`/notifications/${id}`, { method: "DELETE" });
 
 // Export API object for convenience
 export const api = {
   health: checkHealth,
-  register: registerUser,
-  users: {
-    getAll: getAllUsers,
-    getById: getUserById,
-    updateStatus: updateUserStatus,
+  profiles: {
+    getAll: getProfiles,
+    getById: getProfileById,
+    getByEmail: getProfileByEmail,
+    create: createProfile,
+    update: updateProfile,
+  },
+  alerts: {
+    getAll: getAlerts,
+    getById: getAlertById,
+    create: createAlert,
+    dismiss: dismissAlert,
+    delete: deleteAlert,
   },
   dangerZones: {
     getAll: getDangerZones,
+    getById: getDangerZoneById,
     create: createDangerZone,
+    update: updateDangerZone,
     delete: deleteDangerZone,
   },
-  alerts: {
-    getActive: getActiveAlerts,
-    dismiss: dismissAlert,
-    create: createAlert,
-  },
   locations: {
-    update: updateUserLocation,
+    getAll: getLocations,
+    getByProfile: getLocationsByProfile,
+    create: createLocation,
+    updateProfileLocation: updateProfileLocation,
   },
   notifications: {
-    send: sendNotification,
-    getForUser: getNotificationsForUser,
+    getAll: getNotifications,
+    getByProfile: getNotificationsByProfile,
+    create: createNotification,
     markRead: markNotificationRead,
+    delete: deleteNotification,
   },
-  analytics: getAnalytics,
 };
