@@ -1,116 +1,122 @@
-import { useEffect, useState } from 'react';
-import { api } from '@/lib/api';
+import { useEffect, useRef, useState } from 'react';
+import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
+import type { Tables } from '@/integrations/supabase/types';
 
-interface AdminNotification {
-  id: number;
-  profile_id: number;
-  message: string;
-  read: boolean;
-  created_at: string;
-}
+type AdminNotification = Tables<'admin_notifications'>;
 
 interface UseRealtimeNotificationsOptions {
-  touristId: string;
-  enabled?: boolean;
+    touristId: string;
+    enabled?: boolean;
 }
 
 export function useRealtimeNotifications({
-  touristId,
-  enabled = true,
+    touristId,
+    enabled = true,
 }: UseRealtimeNotificationsOptions) {
-  const { toast } = useToast();
-  const [notifications, setNotifications] = useState<AdminNotification[]>([]);
-  const [unreadCount, setUnreadCount] = useState(0);
-  const lastNotificationIdRef = useState<number>(0);
+    const { toast } = useToast();
+    const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+    const [notifications, setNotifications] = useState<AdminNotification[]>([]);
+    const [unreadCount, setUnreadCount] = useState(0);
 
-  // Initial fetch
-  useEffect(() => {
-    if (!enabled || !touristId) return;
+    // Initial fetch
+    useEffect(() => {
+        if (!enabled || !touristId) return;
 
-    const fetchNotifications = async () => {
-      try {
-        const data = await api.notifications.getAll();
-        const filteredData = (data || []).filter((n: AdminNotification) => {
-          // Filter by touristId if profile_id matches
-          return true; // For now, show all notifications
-        });
-        
-        setNotifications(filteredData);
-        setUnreadCount(filteredData.filter(n => !n.read).length);
-      } catch (error) {
-        console.error('Error fetching notifications:', error);
-      }
+        const fetchNotifications = async () => {
+            const { data, error } = await supabase
+                .from('admin_notifications')
+                .select('*')
+                .eq('tourist_id', touristId)
+                .order('created_at', { ascending: false })
+                .limit(50);
+
+            if (error) {
+                console.error('Error fetching notifications:', error);
+                return;
+            }
+
+            setNotifications(data || []);
+            setUnreadCount((data || []).filter(n => !n.read).length);
+        };
+
+        fetchNotifications();
+
+        // Subscribe to realtime
+        const channel = supabase
+            .channel('admin-notifications-realtime')
+            .on(
+                'postgres_changes',
+                {
+                    event: 'INSERT',
+                    schema: 'public',
+                    table: 'admin_notifications',
+                    filter: `tourist_id=eq.${touristId}`,
+                },
+                (payload) => {
+                    const newNotification = payload.new as AdminNotification;
+                    setNotifications(prev => [newNotification, ...prev]);
+                    setUnreadCount(prev => prev + 1);
+
+                    // Show toast based on notification type
+                    const typeIcons: Record<string, string> = {
+                        danger: '🚨',
+                        evacuation: '🏃',
+                        warning: '⚠️',
+                        info: 'ℹ️',
+                    };
+                    const icon = typeIcons[newNotification.notification_type || 'warning'] || '⚠️';
+
+                    toast({
+                        title: `${icon} Admin Alert`,
+                        description: newNotification.message,
+                        variant: newNotification.notification_type === 'danger' || newNotification.notification_type === 'evacuation'
+                            ? 'destructive'
+                            : 'default',
+                    });
+                }
+            )
+            .subscribe();
+
+        channelRef.current = channel;
+
+        return () => {
+            if (channelRef.current) {
+                supabase.removeChannel(channelRef.current);
+            }
+        };
+    }, [enabled, touristId, toast]);
+
+    const markAsRead = async (id: string) => {
+        await supabase
+            .from('admin_notifications')
+            .update({ read: true })
+            .eq('id', id);
+
+        setNotifications(prev =>
+            prev.map(n => n.id === id ? { ...n, read: true } : n)
+        );
+        setUnreadCount(prev => Math.max(0, prev - 1));
     };
 
-    fetchNotifications();
+    const markAllRead = async () => {
+        const unread = notifications.filter(n => !n.read);
+        if (unread.length === 0) return;
 
-    // Poll for updates every 5 seconds (replaces realtime subscriptions)
-    const intervalId = setInterval(async () => {
-      try {
-        const data = await api.notifications.getAll();
-        const newNotifications = data || [];
-        
-        // Check for new notifications
-        newNotifications.forEach((notification: AdminNotification) => {
-          if (notification.id > lastNotificationIdRef[0]) {
-            setNotifications(prev => [notification, ...prev]);
-            setUnreadCount(prev => prev + 1);
+        await supabase
+            .from('admin_notifications')
+            .update({ read: true })
+            .eq('tourist_id', touristId)
+            .eq('read', false);
 
-            // Show toast based on notification content
-            const icon = '⚠️';
-
-            toast({
-              title: `${icon} Admin Alert`,
-              description: notification.message,
-              variant: 'default',
-            });
-            
-            lastNotificationIdRef[0] = notification.id;
-          }
-        });
-      } catch (error) {
-        console.error('Notification poll error:', error);
-      }
-    }, 5000);
-
-    return () => {
-      clearInterval(intervalId);
+        setNotifications(prev => prev.map(n => ({ ...n, read: true })));
+        setUnreadCount(0);
     };
-  }, [enabled, touristId, toast]);
 
-  const markAsRead = async (id: number) => {
-    try {
-      await api.notifications.markRead(id);
-      setNotifications(prev =>
-        prev.map(n => n.id === id ? { ...n, read: true } : n)
-      );
-      setUnreadCount(prev => Math.max(0, prev - 1));
-    } catch (error) {
-      console.error('Error marking notification as read:', error);
-    }
-  };
-
-  const markAllRead = async () => {
-    try {
-      const unread = notifications.filter(n => !n.read);
-      if (unread.length === 0) return;
-
-      for (const notification of unread) {
-        await api.notifications.markRead(notification.id);
-      }
-      
-      setNotifications(prev => prev.map(n => ({ ...n, read: true })));
-      setUnreadCount(0);
-    } catch (error) {
-      console.error('Error marking all notifications as read:', error);
-    }
-  };
-
-  return {
-    notifications,
-    unreadCount,
-    markAsRead,
-    markAllRead,
-  };
+    return {
+        notifications,
+        unreadCount,
+        markAsRead,
+        markAllRead,
+    };
 }

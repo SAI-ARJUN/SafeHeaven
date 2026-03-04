@@ -2,9 +2,6 @@ import React, { useEffect, useRef, useState } from 'react';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
 
-// Set Mapbox token automatically from environment
-mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_TOKEN || '';
-
 interface DangerZone {
   id: string;
   name: string;
@@ -149,18 +146,25 @@ const MapboxMap: React.FC<Props> = ({
   const markersRef = useRef<mapboxgl.Marker[]>([]);
   const zoneIdsRef = useRef<string[]>([]);
 
-  const [ready, setReady] = useState(!!mapboxgl.accessToken);
+  const envToken = import.meta.env.VITE_MAPBOX_TOKEN || '';
+  const [token, setToken] = useState(envToken || localStorage.getItem('mapboxToken') || '');
+  const [ready, setReady] = useState(!!token);
+
+  const saveToken = () => {
+    if (!token.trim()) return;
+    localStorage.setItem('mapboxToken', token.trim());
+    setReady(true);
+  };
+
+  useEffect(() => {
+    if (envToken && !ready) setReady(true);
+  }, [envToken, ready]);
 
   // ── MAP INIT ──────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!containerRef.current || !ready || mapRef.current) return;
 
-    // Center on current user location if available, otherwise default to India
-    const defaultCenter = currentUserLocation
-      ? [currentUserLocation.lng, currentUserLocation.lat]
-      : [78.9629, 20.5937];
-    const defaultZoom = currentUserLocation ? 15 : 4;
-
+    mapboxgl.accessToken = token;
     mapRef.current = new mapboxgl.Map({
       container: containerRef.current,
       style: 'mapbox://styles/mapbox/dark-v11',
@@ -292,6 +296,23 @@ const MapboxMap: React.FC<Props> = ({
       markersRef.current.push(marker);
     }
   }, [userLocations, currentUserLocation, showUserMarkers]);
+
+  // ── TOKEN INPUT ───────────────────────────────────────────────────────────
+  if (!ready) {
+    return (
+      <div className="flex flex-col gap-3 p-4">
+        <input
+          placeholder="Enter Mapbox Token"
+          value={token}
+          onChange={(e) => setToken(e.target.value)}
+          className="p-2 border rounded"
+        />
+        <button onClick={saveToken} className="p-2 bg-blue-500 text-white rounded">
+          Save Token
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div className="relative w-full h-full">

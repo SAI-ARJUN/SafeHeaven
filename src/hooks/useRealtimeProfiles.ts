@@ -1,16 +1,8 @@
 import { useEffect } from 'react';
-import { api } from '@/lib/api';
+import { supabase } from '@/integrations/supabase/client';
+import type { Tables } from '@/integrations/supabase/types';
 
-interface Profile {
-  id: number;
-  email: string;
-  name: string;
-  phone: string;
-  status: string;
-  location_status: string;
-  created_at: string;
-  updated_at: string;
-}
+type Profile = Tables<'profiles'>;
 
 interface UseRealtimeProfilesOptions {
   onNewProfile?: (profile: Profile) => void;
@@ -28,42 +20,56 @@ export function useRealtimeProfiles({
   useEffect(() => {
     if (!enabled) return;
 
-    let lastKnownProfiles = new Set<number>();
-
-    const fetchProfiles = async () => {
-      try {
-        const data = await api.profiles.getAll();
-        const currentIds = new Set((data || []).map((p: Profile) => p.id));
-
-        // Check for new profiles
-        (data || []).forEach((profile: Profile) => {
-          if (!lastKnownProfiles.has(profile.id)) {
-            console.log('New profile registered:', profile);
-            onNewProfile?.(profile);
+    const channel = supabase
+      .channel('profiles-changes')
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'profiles',
+        },
+        (payload) => {
+          console.log('New profile registered:', payload.new);
+          if (onNewProfile) {
+            onNewProfile(payload.new as Profile);
           }
-        });
-
-        // Check for deleted profiles
-        lastKnownProfiles.forEach(id => {
-          if (!currentIds.has(id)) {
-            console.log('Profile deleted:', id);
-            onProfileDeleted?.({ id } as Profile);
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'profiles',
+        },
+        (payload) => {
+          console.log('Profile updated:', payload.new);
+          if (onProfileUpdated) {
+            onProfileUpdated(payload.new as Profile);
           }
-        });
-
-        lastKnownProfiles = currentIds;
-      } catch (error) {
-        console.error('Profile fetch error:', error);
-      }
-    };
-
-    fetchProfiles();
-
-    // Poll for updates every 10 seconds (replaces realtime subscriptions)
-    const intervalId = setInterval(fetchProfiles, 10000);
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'DELETE',
+          schema: 'public',
+          table: 'profiles',
+        },
+        (payload) => {
+          console.log('Profile deleted:', payload.old);
+          if (onProfileDeleted) {
+            onProfileDeleted(payload.old as Profile);
+          }
+        }
+      )
+      .subscribe((status) => {
+        console.log('Profiles realtime subscription status:', status);
+      });
 
     return () => {
-      clearInterval(intervalId);
+      supabase.removeChannel(channel);
     };
   }, [enabled, onNewProfile, onProfileUpdated, onProfileDeleted]);
 }

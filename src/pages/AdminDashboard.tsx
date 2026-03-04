@@ -19,60 +19,27 @@ import {
   Send,
   MessageSquare,
   X,
-  Mail,
-  Phone
+  Radio,
+  Activity
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useAuth } from '@/contexts/AuthContext';
 import { useWallet } from '@/contexts/WalletContext';
 import { useToast } from '@/hooks/use-toast';
-import LeafletMap from '@/components/LeafletMap';
+import MapboxMap from '@/components/MapboxMap';
 import { useContract } from '@/hooks/useContract';
 import { useRealtimeAlerts } from '@/hooks/useRealtimeAlerts';
 import { useRealtimeLocations } from '@/hooks/useRealtimeLocations';
 import { useRealtimeProfiles } from '@/hooks/useRealtimeProfiles';
 import { api } from '@/lib/api';
+import { supabase } from '@/integrations/supabase/client';
+import type { Tables } from '@/integrations/supabase/types';
 
-interface Profile {
-  id: number;
-  email: string;
-  name: string;
-  phone: string;
-  status: string;
-  location_status: string;
-  created_at: string;
-  updated_at: string;
-}
-interface Alert {
-  id: number;
-  profile_id: number;
-  latitude: number;
-  longitude: number;
-  location_name: string;
-  severity: string;
-  description: string;
-  dismissed: boolean;
-  created_at: string;
-}
-interface DangerZone {
-  id: number;
-  name: string;
-  latitude: number;
-  longitude: number;
-  radius: number;
-  severity: string;
-  description: string;
-  created_at: string;
-}
-interface UserLocation {
-  id: number;
-  profile_id: number;
-  latitude: number;
-  longitude: number;
-  accuracy: number;
-  timestamp: string;
-}
+type Profile = Tables<'profiles'>;
+type Alert = Tables<'alerts'>;
+type DangerZone = Tables<'danger_zones'>;
+type UserLocation = Tables<'user_locations'>;
 
 interface BlockchainAlert {
   id: string;
@@ -83,12 +50,6 @@ interface BlockchainAlert {
   timestamp: Date;
   type: 'emergency' | 'status';
 }
-
-// Timestamp parsing helper - ensures UTC parsing
-const parseUTC = (ts: string): Date => {
-  const normalized = /Z$|[+-]\d{2}:\d{2}$/.test(ts) ? ts : ts + 'Z';
-  return new Date(normalized);
-};
 
 const AdminDashboard: React.FC = () => {
   const navigate = useNavigate();
@@ -129,46 +90,60 @@ const AdminDashboard: React.FC = () => {
     onDangerZoneAdded,
   } = useContract();
 
-  // Load data from MySQL API
+  // Load data directly from Supabase - optimized with parallel queries and limits
   const loadData = useCallback(async () => {
     try {
-      const [usersData, alertsData, zonesData, locationsData] = await Promise.all([
-        api.profiles.getAll(),
-        api.alerts.getAll(),
-        api.dangerZones.getAll(),
-        api.locations.getAll(),
+      console.log('🔄 Loading admin dashboard data from Supabase...');
+      console.log('📡 Supabase URL:', supabase.supabaseUrl);
+      
+      // Load all data in parallel with reasonable limits
+      const [usersRes, alertsRes, zonesRes] = await Promise.all([
+        supabase.from('profiles').select('*').order('created_at', { ascending: false }).limit(100),
+        supabase.from('alerts').select('*').order('created_at', { ascending: false }).limit(50), // Last 50 alerts only
+        supabase.from('danger_zones').select('*').order('created_at', { ascending: false }),
       ]);
 
-      setUsers(usersData || []);
-      setAlerts(alertsData || []);
-      setDangerZones(zonesData || []);
+      console.log('📊 Users response:', {
+        data: usersRes.data?.length || 0,
+        error: usersRes.error,
+        details: usersRes.data?.map(u => ({ tourist_id: u.tourist_id, username: u.username }))
+      });
+      console.log('🚨 Alerts response:', {
+        data: alertsRes.data?.length || 0,
+        error: alertsRes.error
+      });
+      console.log('🛡️ Zones response:', {
+        data: zonesRes.data?.length || 0,
+        error: zonesRes.error
+      });
+
+      const loadedUsers = usersRes.data || [];
+      const loadedAlerts = alertsRes.data || [];
+
+      if (usersRes.error) {
+        console.error('❌ profiles error:', usersRes.error);
+        toast({
+          title: 'Database Error',
+          description: `Failed to load users: ${usersRes.error.message}`,
+          variant: 'destructive',
+        });
+      }
+      if (alertsRes.error) console.error('❌ alerts error:', alertsRes.error);
+      if (zonesRes.error) console.error('❌ danger_zones error:', zonesRes.error);
+
+      setUsers(loadedUsers);
+      setAlerts(loadedAlerts);
+      setDangerZones(zonesRes.data || []);
       
-      // Process locations to get latest per profile
-      const locations = locationsData || [];
-      const latestLocationsMap = new Map();
-      
-      locations.forEach((loc: any) => {
-        const profileId = loc.profile_id?.toString() || '';
-        const existing = latestLocationsMap.get(profileId);
-        if (!existing || new Date(loc.timestamp || loc.createdAt) > new Date(existing.timestamp || existing.createdAt)) {
-          latestLocationsMap.set(profileId, loc);
-        }
+      console.log('✅ Dashboard data loaded:', {
+        users: loadedUsers.length,
+        alerts: loadedAlerts.length,
+        zones: zonesRes.data?.length || 0
       });
       
-      const latestLocations = Array.from(latestLocationsMap.values()).map((loc: any) => ({
-        id: loc._id || loc.id,
-        profile_id: loc.profile_id,
-        latitude: loc.latitude,
-        longitude: loc.longitude,
-        accuracy: loc.accuracy,
-        timestamp: loc.timestamp || loc.createdAt,
-        tourist_id: loc.profile_id?.toString() || '',
-        user_id: loc.profile_id?.toString() || '',
-        status: 'safe',
-      }));
-      
-      setUserLocations(latestLocations);
-
+      if (loadedUsers.length === 0) {
+        console.warn('⚠️ No users found in database. Register users first.');
+      }
     } catch (error) {
       console.error('❌ Error loading data:', error);
       toast({
@@ -198,57 +173,21 @@ const AdminDashboard: React.FC = () => {
   // Realtime locations subscription — using split callbacks
   useRealtimeLocations({
     onLocationsLoaded: (locations) => {
-      console.log('📍 Locations loaded:', locations.length);
-      
-      // Get latest location per profile
-      const latestLocationsMap = new Map();
-      locations.forEach((loc: any) => {
-        const profileId = loc.profile_id?.toString() || '';
-        const existing = latestLocationsMap.get(profileId);
-        if (!existing || new Date(loc.timestamp || loc.createdAt) > new Date(existing.timestamp || existing.createdAt)) {
-          latestLocationsMap.set(profileId, loc);
-        }
-      });
-      
-      // Convert MongoDB locations to UserLocation format for the map
-      const userLocs = Array.from(latestLocationsMap.values()).map((loc: any) => ({
-        id: loc._id || loc.id,
-        profile_id: loc.profile_id,
-        latitude: loc.latitude,
-        longitude: loc.longitude,
-        accuracy: loc.accuracy,
-        timestamp: loc.timestamp || loc.createdAt,
-        tourist_id: loc.profile_id?.toString() || '',
-        user_id: loc.profile_id?.toString() || '',
-        status: 'safe', // Default status, will be updated from profile
-      }));
-      setUserLocations(userLocs);
+      setUserLocations(locations);
     },
     onLocationUpdate: (location) => {
-      console.log('📍 Location update received:', location.profile_id, 'at', location.latitude, location.longitude);
       setUserLocations(prev => {
-        const existing = prev.findIndex(l => l.profile_id === location.profile_id);
+        const existing = prev.findIndex(l => l.user_id === location.user_id);
         if (existing >= 0) {
           const updated = [...prev];
-          updated[existing] = {
-            ...location,
-            tourist_id: location.profile_id?.toString() || '',
-            user_id: location.profile_id?.toString() || '',
-          } as any;
-          console.log('📍 Updated location for profile:', location.profile_id);
+          updated[existing] = location;
           return updated;
         }
-        console.log('📍 New location for profile:', location.profile_id);
-        return [...prev, {
-          ...location,
-          tourist_id: location.profile_id?.toString() || '',
-          user_id: location.profile_id?.toString() || '',
-        } as any];
+        return [...prev, location];
       });
       setLastLocationUpdate(new Date());
     },
     enabled: true,
-    refreshInterval: 3000, // Poll every 3 seconds for real-time tracking
   });
 
   // Realtime profiles subscription for new user registrations
@@ -345,9 +284,10 @@ const AdminDashboard: React.FC = () => {
     navigate('/admin-login');
   };
 
-  const dismissAlert = async (alertId: number) => {
+  const dismissAlert = async (alertId: string) => {
     try {
-      await api.alerts.dismiss(alertId);
+      const { error } = await supabase.from('alerts').update({ dismissed: true }).eq('id', alertId);
+      if (error) throw error;
       setAlerts(prev => prev.filter(a => a.id !== alertId));
       toast({
         title: 'Alert Dismissed',
@@ -386,15 +326,18 @@ const AdminDashboard: React.FC = () => {
       }
 
       // Add to database directly
-      const zoneData = await api.dangerZones.create({
+      const { data: zoneData, error: zoneError } = await supabase.from('danger_zones').insert({
         name: newZone.name,
-        latitude: parseFloat(newZone.lat),
-        longitude: parseFloat(newZone.lng),
+        lat: parseFloat(newZone.lat),
+        lng: parseFloat(newZone.lng),
         radius: parseFloat(newZone.radius),
-        severity: newZone.level.toLowerCase(),
-      });
+        level: newZone.level,
+      }).select().single();
 
-      setDangerZones(prev => [zoneData, ...prev]);
+      if (zoneError) throw zoneError;
+      if (zoneData) {
+        setDangerZones(prev => [zoneData, ...prev]);
+      }
 
       setNewZone({ name: '', lat: '', lng: '', radius: '', level: 'Medium' });
       setShowAddZone(false);
@@ -414,7 +357,7 @@ const AdminDashboard: React.FC = () => {
     }
   };
 
-  const removeDangerZone = async (id: number, blockchainId?: number) => {
+  const removeDangerZone = async (id: string, blockchainId?: number) => {
     try {
       // Remove from blockchain if connected
       if (isContractInitialized && blockchainId !== undefined) {
@@ -422,7 +365,8 @@ const AdminDashboard: React.FC = () => {
         if (!success) return;
       }
 
-      await api.dangerZones.delete(id);
+      const { error: delError } = await supabase.from('danger_zones').delete().eq('id', id);
+      if (delError) throw delError;
       setDangerZones(prev => prev.filter(z => z.id !== id));
 
       toast({
@@ -514,31 +458,6 @@ const AdminDashboard: React.FC = () => {
     }
   };
 
-  // Registered tourists: from profiles table, or derived from alerts as fallback
-  // Use LATEST alert status per tourist
-  const displayUsers = users.length > 0 ? users : Object.values(
-    alerts.reduce((acc, a) => {
-      const existing = acc[a.tourist_id];
-      const isNewer = !existing ||
-        new Date(a.created_at ?? 0) > new Date(existing.created_at ?? 0);
-      if (isNewer) {
-        acc[a.tourist_id] = {
-          id: a.tourist_id,
-          user_id: a.user_id,
-          tourist_id: a.tourist_id,
-          username: a.username ?? 'Unknown',
-          email: null,
-          phone: null,
-          dob: null,
-          wallet_address: null,
-          status: a.status ?? 'safe',
-          created_at: a.created_at,
-        } as Profile;
-      }
-      return acc;
-    }, {} as Record<string, Profile>)
-  );
-
   // Format locations for map — MERGE user_locations (live GPS) + alerts (fallback)
   // This ensures ALL tourists appear, regardless of which data source succeeds
   const mapLocations = (() => {
@@ -546,30 +465,14 @@ const AdminDashboard: React.FC = () => {
     const merged: Record<string, { touristId: string; username: string; lat: number; lng: number; status: 'safe' | 'alert' | 'danger' }> = {};
 
     for (const loc of userLocations) {
-      // Get profile info from users list - match by profile_id
-      const profileIdStr = loc.profile_id?.toString() || '';
-      
-      // Find profile by ID
-      const profile = displayUsers.find(u => {
-        const userId = u.id?.toString() || (u as any)._id?.toString() || '';
-        return userId === profileIdStr;
-      });
-
-      // If no profile found by ID, try to find by name (touristId stored in name field)
-      const touristId = profile?.name || profile?.username || profileIdStr || loc.tourist_id || `User-${profileIdStr}`;
-
-      // Use profile status if available (most recent), otherwise use location status
-      const statusFromProfile = profile?.status as 'safe' | 'alert' | 'danger';
-
-      if (touristId) {
-        merged[touristId] = {
-          touristId,
-          username: profile?.name || profile?.username || touristId,
-          lat: loc.latitude || loc.lat,
-          lng: loc.longitude || loc.lng,
-          status: statusFromProfile || (loc.status || 'safe') as 'safe' | 'alert' | 'danger',
-        };
-      }
+      const profile = displayUsers.find(u => u.tourist_id === loc.tourist_id);
+      merged[loc.tourist_id] = {
+        touristId: loc.tourist_id,
+        username: profile?.username || loc.tourist_id,
+        lat: loc.lat,
+        lng: loc.lng,
+        status: (loc.status || 'safe') as 'safe' | 'alert' | 'danger',
+      };
     }
 
     // Step 2: fill in tourists missing from user_locations using latest alert lat/lng
@@ -597,9 +500,12 @@ const AdminDashboard: React.FC = () => {
       }
     }
 
-    console.log('🗺️ Map locations:', Object.values(merged));
     return Object.values(merged);
   })();
+
+
+  // Registered tourists: directly from users state (loaded from profiles table)
+  const displayUsers = users;
 
   // Stats derived from displayUsers
   const statsTotal = displayUsers.length;
@@ -770,7 +676,7 @@ const AdminDashboard: React.FC = () => {
             )}
           </div>
           <div className="h-[400px] rounded-xl overflow-hidden">
-            <LeafletMap
+            <MapboxMap
               dangerZones={mapDangerZones}
               userLocations={mapLocations}
               showDangerZones={true}
@@ -844,100 +750,51 @@ const AdminDashboard: React.FC = () => {
               </span>
             </h2>
             <div className="space-y-3 max-h-64 overflow-y-auto">
-              {alerts.map((alert) => {
-                // 🔴 Use the REAL-TIME status from profile (what user updated)
-                const userStatus = alert.status || 'safe';
-                
-                // Status badge configuration
-                const statusConfig = {
-                  safe: { label: '✅ SAFE', color: 'bg-success/20 text-success', iconColor: 'text-success', bg: 'bg-success/10 border-success/30' },
-                  alert: { label: '⚠️ ALERT', color: 'bg-warning/20 text-warning', iconColor: 'text-warning', bg: 'bg-warning/10 border-warning/30' },
-                  danger: { label: '🚨 DANGER', color: 'bg-destructive/20 text-destructive animate-pulse', iconColor: 'text-destructive', bg: 'bg-destructive/10 border-destructive/30' },
-                };
-                
-                const config = statusConfig[userStatus as keyof typeof statusConfig] || statusConfig.safe;
-                
-                // 🔴 Only show Dismiss button for SAFE status
-                const showDismiss = userStatus === 'safe';
-                
-                return (
-                  <div
-                    key={alert.id}
-                    className={`p-4 rounded-xl border ${config.bg}`}
-                  >
-                    <div className="flex items-start justify-between">
-                      <div className="flex-1">
-                        <div className="flex items-center gap-2 mb-2">
-                          <AlertTriangle className={`w-4 h-4 ${config.iconColor}`} />
-                          <span className="font-semibold text-base">{alert.username || 'Unknown User'}</span>
-                          <span className={`text-xs px-2 py-1 rounded-full font-bold ${config.color}`}>
-                            {config.label}
-                          </span>
-                        </div>
-                        
-                        {/* User Details */}
-                        <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-muted-foreground mb-2">
-                          {alert.email && (
-                            <div className="flex items-center gap-1">
-                              <Mail className="w-3 h-3" />
-                              <span className="truncate">{alert.email}</span>
-                            </div>
-                          )}
-                          {alert.phone && (
-                            <div className="flex items-center gap-1">
-                              <Phone className="w-3 h-3" />
-                              <span>{alert.phone}</span>
-                            </div>
-                          )}
-                          {alert.wallet_address && (
-                            <div className="flex items-center gap-1 col-span-2">
-                              <Wallet className="w-3 h-3 text-primary" />
-                              <span className="font-mono text-[10px]">{alert.wallet_address.slice(0, 10)}...{alert.wallet_address.slice(-8)}</span>
-                            </div>
-                          )}
-                        </div>
-                        
-                        {/* Alert Details */}
-                        <div className="flex items-center gap-4 text-xs text-muted-foreground mt-2 flex-wrap">
-                          {alert.zone_name && (
-                            <div className="flex items-center gap-1">
-                              <span className="text-xs text-muted-foreground">entered</span>
-                              <span className="font-medium text-destructive">{alert.zone_name}</span>
-                            </div>
-                          )}
-                          {alert.lat && alert.lng && (
-                            <div className="flex items-center gap-1">
-                              <MapPin className="w-3 h-3" />
-                              <span className="font-mono">{alert.lat.toFixed(4)}, {alert.lng.toFixed(4)}</span>
-                            </div>
-                          )}
-                          {alert.description && (
-                            <div className="text-xs text-muted-foreground italic">
-                              "{alert.description}"
-                            </div>
-                          )}
-                          {alert.created_at && (
-                            <div className="flex items-center gap-1">
-                              <Clock className="w-3 h-3" />
-                              {parseUTC(alert.created_at).toLocaleString([], { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                            </div>
-                          )}
-                        </div>
+              {alerts.map((alert) => (
+                <div
+                  key={alert.id}
+                  className={`p-4 rounded-xl border ${alert.alert_type === 'entered_danger_zone'
+                    ? 'bg-destructive/10 border-destructive/30'
+                    : alert.status === 'danger'
+                      ? 'bg-destructive/10 border-destructive/30'
+                      : 'bg-warning/10 border-warning/30'
+                    }`}
+                >
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <AlertTriangle className={`w-4 h-4 ${alert.status === 'danger' ? 'text-destructive' : 'text-warning'}`} />
+                        <span className="font-medium">{alert.username}</span>
+                        {alert.zone_name && (
+                          <>
+                            <span className="text-xs text-muted-foreground">entered</span>
+                            <span className="font-medium text-destructive">{alert.zone_name}</span>
+                          </>
+                        )}
                       </div>
-                      {showDismiss && (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => dismissAlert(alert.id)}
-                          className="text-muted-foreground hover:text-foreground ml-2 flex-shrink-0"
-                        >
-                          Dismiss
-                        </Button>
+                      <p className="text-xs text-muted-foreground mt-1 font-mono">{alert.tourist_id}</p>
+                      {alert.lat && alert.lng && (
+                        <p className="text-xs text-muted-foreground flex items-center gap-1 mt-1">
+                          <MapPin className="w-3 h-3" />
+                          {alert.lat.toFixed(4)}, {alert.lng.toFixed(4)}
+                        </p>
                       )}
+                      <p className="text-xs text-muted-foreground flex items-center gap-1 mt-1">
+                        <Clock className="w-3 h-3" />
+                        {alert.created_at && new Date(alert.created_at).toLocaleString()}
+                      </p>
                     </div>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => dismissAlert(alert.id)}
+                      className="text-muted-foreground hover:text-foreground"
+                    >
+                      Dismiss
+                    </Button>
                   </div>
-                );
-              })}
+                </div>
+              ))}
             </div>
           </div>
         )}
